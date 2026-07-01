@@ -21,4 +21,4 @@ gcc main.c $(pkg-config --cflags --libs gtk4 webkitgtk-6.0) -o ubar
 ./ubar
 ```
 
-Current app opens one window and loads `https://example.com`.
+Current app opens one window on `about:blank`.

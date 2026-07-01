@@ -217,7 +217,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     web_view = webkit_web_view_new();
     state->web_view = WEBKIT_WEB_VIEW(web_view);
 
-    gtk_editable_set_text(GTK_EDITABLE(state->address_entry), "https://example.com");
+    gtk_editable_set_text(GTK_EDITABLE(state->address_entry), "about:blank");
     gtk_widget_set_hexpand(state->address_entry, TRUE);
     gtk_widget_set_hexpand(web_view, TRUE);
     gtk_widget_set_vexpand(web_view, TRUE);
@@ -243,7 +243,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), state);
 
     update_navigation(state);
-    webkit_web_view_load_uri(state->web_view, "https://example.com");
+    webkit_web_view_load_uri(state->web_view, "about:blank");
 
     gtk_window_present(GTK_WINDOW(window));
 }
