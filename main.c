@@ -529,6 +529,7 @@ create_tab(AppState *app, const char *uri)
     gtk_label_set_ellipsize(GTK_LABEL(title_label), PANGO_ELLIPSIZE_END);
     gtk_label_set_max_width_chars(GTK_LABEL(title_label), 32);
     gtk_label_set_xalign(GTK_LABEL(title_label), 0.0f);
+    gtk_widget_set_hexpand(title_label, TRUE);
     tab->favicon_image = favicon_image;
     tab->title_label = title_label;
 
@@ -541,6 +542,7 @@ create_tab(AppState *app, const char *uri)
     close_button = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_button_set_has_frame(GTK_BUTTON(close_button), FALSE);
     gtk_widget_set_focusable(close_button, FALSE);
+    gtk_widget_set_halign(close_button, GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(tab_box), favicon_image);
     gtk_box_append(GTK_BOX(tab_box), title_label);
     gtk_box_append(GTK_BOX(tab_box), close_button);
