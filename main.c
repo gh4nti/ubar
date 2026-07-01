@@ -199,6 +199,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     GtkWidget *vbox;
     GtkWidget *toolbar;
     GtkWidget *web_view;
+    WebKitSettings *settings;
     AppState *state;
 
     (void)user_data;
@@ -223,6 +224,13 @@ on_activate(GtkApplication *app, gpointer user_data)
     state->address_entry = gtk_entry_new();
     web_view = webkit_web_view_new();
     state->web_view = WEBKIT_WEB_VIEW(web_view);
+    settings = webkit_web_view_get_settings(state->web_view);
+
+    webkit_settings_set_hardware_acceleration_policy(
+        settings,
+        WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+    webkit_settings_set_enable_webgl(settings, FALSE);
+    webkit_settings_set_enable_2d_canvas_acceleration(settings, FALSE);
 
     gtk_editable_set_text(GTK_EDITABLE(state->address_entry), "about:blank");
     gtk_widget_set_hexpand(state->address_entry, TRUE);
