@@ -1,5 +1,4 @@
 build/
-ubar
 *.o
 
 .venv/
