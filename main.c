@@ -134,8 +134,10 @@ on_load_changed(WebKitWebView *web_view,
     (void)web_view;
     state = user_data;
 
-    gtk_button_set_label(GTK_BUTTON(state->reload_button),
-                         load_event == WEBKIT_LOAD_STARTED ? "Stop" : "Reload");
+    gtk_button_set_icon_name(GTK_BUTTON(state->reload_button),
+                             load_event == WEBKIT_LOAD_STARTED
+                                 ? "process-stop-symbolic"
+                                 : "view-refresh-symbolic");
     update_navigation(state);
 }
 
@@ -187,9 +189,9 @@ on_activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_margin_end(toolbar, 6);
 
     state->window = window;
-    state->back_button = gtk_button_new_with_label("Back");
-    state->forward_button = gtk_button_new_with_label("Forward");
-    state->reload_button = gtk_button_new_with_label("Reload");
+    state->back_button = gtk_button_new_from_icon_name("go-previous-symbolic");
+    state->forward_button = gtk_button_new_from_icon_name("go-next-symbolic");
+    state->reload_button = gtk_button_new_from_icon_name("view-refresh-symbolic");
     state->address_entry = gtk_entry_new();
     web_view = webkit_web_view_new();
     state->web_view = WEBKIT_WEB_VIEW(web_view);
