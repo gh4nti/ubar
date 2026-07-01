@@ -173,6 +173,18 @@ on_load_failed(WebKitWebView *web_view,
     return FALSE;
 }
 
+static gboolean
+on_permission_request(WebKitWebView *web_view,
+                      WebKitPermissionRequest *request,
+                      gpointer user_data)
+{
+    (void)web_view;
+    (void)user_data;
+
+    webkit_permission_request_deny(request);
+    return TRUE;
+}
+
 static void
 on_activate(GtkApplication *app, gpointer user_data)
 {
@@ -227,6 +239,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     g_signal_connect(state->web_view, "notify::title", G_CALLBACK(on_title_changed), state);
     g_signal_connect(state->web_view, "load-changed", G_CALLBACK(on_load_changed), state);
     g_signal_connect(state->web_view, "load-failed", G_CALLBACK(on_load_failed), state);
+    g_signal_connect(state->web_view, "permission-request", G_CALLBACK(on_permission_request), state);
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), state);
 
     update_navigation(state);
