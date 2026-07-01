@@ -165,6 +165,13 @@ on_load_failed(WebKitWebView *web_view,
     (void)failing_uri;
     state = user_data;
 
+    if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED) ||
+        g_error_matches(error,
+                        WEBKIT_POLICY_ERROR,
+                        WEBKIT_POLICY_ERROR_FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE)) {
+        return TRUE;
+    }
+
     dialog = gtk_alert_dialog_new("%s", error->message);
     gtk_alert_dialog_set_modal(dialog, TRUE);
     gtk_alert_dialog_show(dialog, GTK_WINDOW(state->window));
