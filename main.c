@@ -5,6 +5,9 @@
 typedef struct AppState AppState;
 typedef struct TabState TabState;
 
+static gboolean remove_tab_after_animation(gpointer user_data);
+static void on_new_tab_clicked(GtkButton *button, gpointer user_data);
+
 struct AppState {
     GtkWidget *window;
     GtkWidget *notebook;
@@ -18,6 +21,9 @@ struct AppState {
 struct TabState {
     AppState *app;
     GtkWidget *page;
+    GtkWidget *tab_revealer;
+    GtkWidget *tab_box;
+    GtkWidget *favicon_image;
     GtkWidget *title_label;
     WebKitWebView *web_view;
     gboolean is_loading;
@@ -68,6 +74,70 @@ get_current_tab(AppState *app)
 
     page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app->notebook), page_num);
     return get_tab_from_page(page);
+}
+
+static void
+close_tab(TabState *tab)
+{
+    AppState *app;
+    int page_num;
+
+    if (tab == NULL) {
+        return;
+    }
+
+    app = tab->app;
+    page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
+    if (page_num < 0) {
+        return;
+    }
+
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook)) == 1) {
+        gtk_window_destroy(GTK_WINDOW(app->window));
+        return;
+    }
+
+    gtk_widget_set_sensitive(tab->tab_box, FALSE);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(tab->tab_revealer), FALSE);
+    g_timeout_add(140, remove_tab_after_animation, tab);
+}
+
+static gboolean
+remove_tab_after_animation(gpointer user_data)
+{
+    TabState *tab;
+    AppState *app;
+    int page_num;
+
+    tab = user_data;
+    app = tab->app;
+    page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
+    if (page_num >= 0) {
+        gtk_notebook_remove_page(GTK_NOTEBOOK(app->notebook), page_num);
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+reveal_tab_after_create(gpointer user_data)
+{
+    gtk_revealer_set_reveal_child(GTK_REVEALER(user_data), TRUE);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+update_tab_favicon(TabState *tab)
+{
+    GdkTexture *favicon;
+
+    favicon = webkit_web_view_get_favicon(tab->web_view);
+    if (favicon != NULL) {
+        gtk_image_set_from_paintable(GTK_IMAGE(tab->favicon_image), GDK_PAINTABLE(favicon));
+        return;
+    }
+
+    gtk_image_set_from_icon_name(GTK_IMAGE(tab->favicon_image), "globe-symbolic");
 }
 
 static void
@@ -129,6 +199,22 @@ configure_web_view(WebKitWebView *web_view)
     webkit_settings_set_enable_2d_canvas_acceleration(settings, FALSE);
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
     webkit_settings_set_enable_developer_extras(settings, TRUE);
+}
+
+static void
+switch_tab(AppState *app, int direction)
+{
+    int page_num;
+    int page_count;
+
+    page_count = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook));
+    if (page_count < 2) {
+        return;
+    }
+
+    page_num = gtk_notebook_get_current_page(GTK_NOTEBOOK(app->notebook));
+    page_num = (page_num + direction + page_count) % page_count;
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), page_num);
 }
 
 static void
@@ -240,6 +326,18 @@ on_title_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointer user_data)
 }
 
 static void
+on_favicon_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointer user_data)
+{
+    TabState *tab;
+
+    (void)web_view;
+    (void)pspec;
+    tab = user_data;
+
+    update_tab_favicon(tab);
+}
+
+static void
 on_load_changed(WebKitWebView *web_view,
                 WebKitLoadEvent load_event,
                 gpointer user_data)
@@ -318,32 +416,76 @@ static void
 on_close_tab_clicked(GtkButton *button, gpointer user_data)
 {
     TabState *tab;
-    AppState *app;
-    int page_num;
 
     (void)button;
     tab = user_data;
-    app = tab->app;
+    g_timeout_add(140, remove_tab_after_animation, tab);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(tab->tab_revealer), FALSE);
+}
 
-    page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
-    if (page_num < 0) {
-        return;
+static void
+on_tab_middle_click_pressed(GtkGestureClick *gesture,
+                            int n_press,
+                            double x,
+                            double y,
+                            gpointer user_data)
+{
+    (void)gesture;
+    (void)n_press;
+    (void)x;
+    (void)y;
+    on_close_tab_clicked(NULL, user_data);
+}
+
+static gboolean
+on_window_key_pressed(GtkEventControllerKey *controller,
+                      guint keyval,
+                      guint keycode,
+                      GdkModifierType state,
+                      gpointer user_data)
+{
+    AppState *app;
+
+    (void)controller;
+    (void)keycode;
+    app = user_data;
+
+    if ((state & GDK_CONTROL_MASK) == 0) {
+        return FALSE;
     }
 
-    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook)) == 1) {
-        gtk_window_destroy(GTK_WINDOW(app->window));
-        return;
+    if (keyval == GDK_KEY_t || keyval == GDK_KEY_T) {
+        on_new_tab_clicked(NULL, app);
+        return TRUE;
     }
 
-    gtk_notebook_remove_page(GTK_NOTEBOOK(app->notebook), page_num);
+    if (keyval == GDK_KEY_w || keyval == GDK_KEY_W) {
+        close_tab(get_current_tab(app));
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_Page_Down) {
+        switch_tab(app, (state & GDK_SHIFT_MASK) != 0 ? -1 : 1);
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_ISO_Left_Tab || keyval == GDK_KEY_Page_Up) {
+        switch_tab(app, -1);
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 static TabState *
 create_tab(AppState *app, const char *uri)
 {
+    GtkGesture *middle_click;
     GtkWidget *web_view;
+    GtkWidget *favicon_image;
     GtkWidget *tab_box;
     GtkWidget *close_button;
+    GtkWidget *tab_revealer;
     GtkWidget *title_label;
     TabState *tab;
 
@@ -355,35 +497,60 @@ create_tab(AppState *app, const char *uri)
     tab->web_view = WEBKIT_WEB_VIEW(web_view);
     configure_web_view(tab->web_view);
 
+    favicon_image = gtk_image_new_from_icon_name("globe-symbolic");
     title_label = gtk_label_new("New Tab");
     gtk_label_set_ellipsize(GTK_LABEL(title_label), PANGO_ELLIPSIZE_END);
-    gtk_label_set_max_width_chars(GTK_LABEL(title_label), 24);
+    gtk_label_set_max_width_chars(GTK_LABEL(title_label), 32);
+    gtk_label_set_xalign(GTK_LABEL(title_label), 0.0f);
+    tab->favicon_image = favicon_image;
     tab->title_label = title_label;
 
-    tab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    tab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_top(tab_box, 6);
+    gtk_widget_set_margin_bottom(tab_box, 6);
+    gtk_widget_set_margin_start(tab_box, 10);
+    gtk_widget_set_margin_end(tab_box, 10);
+    gtk_widget_set_size_request(tab_box, 220, -1);
     close_button = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_button_set_has_frame(GTK_BUTTON(close_button), FALSE);
     gtk_widget_set_focusable(close_button, FALSE);
+    gtk_box_append(GTK_BOX(tab_box), favicon_image);
     gtk_box_append(GTK_BOX(tab_box), title_label);
     gtk_box_append(GTK_BOX(tab_box), close_button);
+    tab_revealer = gtk_revealer_new();
+    gtk_revealer_set_transition_type(GTK_REVEALER(tab_revealer),
+                                     GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
+    gtk_revealer_set_transition_duration(GTK_REVEALER(tab_revealer), 140);
+    gtk_revealer_set_child(GTK_REVEALER(tab_revealer), tab_box);
+    gtk_revealer_set_reveal_child(GTK_REVEALER(tab_revealer), FALSE);
+    tab->tab_revealer = tab_revealer;
+    tab->tab_box = tab_box;
 
     gtk_widget_set_hexpand(web_view, TRUE);
     gtk_widget_set_vexpand(web_view, TRUE);
 
     g_object_set_data_full(G_OBJECT(web_view), "tab-state", tab, g_free);
 
-    gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), web_view, tab_box);
+    gtk_notebook_append_page(GTK_NOTEBOOK(app->notebook), web_view, tab_revealer);
     gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(app->notebook), web_view, TRUE);
 
+    middle_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(middle_click), GDK_BUTTON_MIDDLE);
+    gtk_widget_add_controller(tab_revealer, GTK_EVENT_CONTROLLER(middle_click));
+
     g_signal_connect(close_button, "clicked", G_CALLBACK(on_close_tab_clicked), tab);
+    g_signal_connect(middle_click, "pressed", G_CALLBACK(on_tab_middle_click_pressed), tab);
     g_signal_connect(tab->web_view, "notify::uri", G_CALLBACK(on_uri_changed), tab);
     g_signal_connect(tab->web_view, "notify::title", G_CALLBACK(on_title_changed), tab);
+    g_signal_connect(tab->web_view, "notify::favicon", G_CALLBACK(on_favicon_changed), tab);
     g_signal_connect(tab->web_view, "load-changed", G_CALLBACK(on_load_changed), tab);
     g_signal_connect(tab->web_view, "load-failed", G_CALLBACK(on_load_failed), tab);
     g_signal_connect(tab->web_view, "permission-request", G_CALLBACK(on_permission_request), tab);
 
+    update_tab_favicon(tab);
     update_tab_label(tab);
     webkit_web_view_load_uri(tab->web_view, uri);
+    g_idle_add(reveal_tab_after_create, tab_revealer);
 
     return tab;
 }
@@ -405,6 +572,7 @@ on_new_tab_clicked(GtkButton *button, gpointer user_data)
 static void
 on_activate(GtkApplication *app, gpointer user_data)
 {
+    GtkEventController *key_controller;
     GtkWidget *window;
     GtkWidget *vbox;
     GtkWidget *toolbar;
@@ -450,6 +618,8 @@ on_activate(GtkApplication *app, gpointer user_data)
     gtk_box_append(GTK_BOX(vbox), toolbar);
     gtk_box_append(GTK_BOX(vbox), state->notebook);
     gtk_window_set_child(GTK_WINDOW(window), vbox);
+    key_controller = gtk_event_controller_key_new();
+    gtk_widget_add_controller(window, key_controller);
 
     g_signal_connect(state->back_button, "clicked", G_CALLBACK(on_back_clicked), state);
     g_signal_connect(state->forward_button, "clicked", G_CALLBACK(on_forward_clicked), state);
@@ -457,6 +627,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     g_signal_connect(state->address_entry, "activate", G_CALLBACK(on_address_activate), state);
     g_signal_connect(state->new_tab_button, "clicked", G_CALLBACK(on_new_tab_clicked), state);
     g_signal_connect(state->notebook, "switch-page", G_CALLBACK(on_switch_page), state);
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_window_key_pressed), state);
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), state);
 
     tab = create_tab(state, "about:blank");
