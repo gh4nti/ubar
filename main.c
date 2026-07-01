@@ -80,6 +80,7 @@ static void
 close_tab(TabState *tab)
 {
     AppState *app;
+    int next_page_num;
     int page_num;
 
     if (tab == NULL) {
@@ -97,6 +98,12 @@ close_tab(TabState *tab)
         return;
     }
 
+    next_page_num = page_num;
+    if (page_num == gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook)) - 1) {
+        next_page_num = page_num - 1;
+    }
+
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), next_page_num);
     gtk_widget_set_sensitive(tab->tab_box, FALSE);
     gtk_revealer_set_reveal_child(GTK_REVEALER(tab->tab_revealer), FALSE);
     g_timeout_add(140, remove_tab_after_animation, tab);
@@ -419,8 +426,7 @@ on_close_tab_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     tab = user_data;
-    g_timeout_add(140, remove_tab_after_animation, tab);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(tab->tab_revealer), FALSE);
+    close_tab(tab);
 }
 
 static void
@@ -451,11 +457,32 @@ on_window_key_pressed(GtkEventControllerKey *controller,
     app = user_data;
 
     if ((state & GDK_CONTROL_MASK) == 0) {
+        if (keyval == GDK_KEY_Escape) {
+            TabState *tab;
+
+            tab = get_current_tab(app);
+            if (tab != NULL && tab->is_loading) {
+                webkit_web_view_stop_loading(tab->web_view);
+                return TRUE;
+            }
+        }
+
         return FALSE;
     }
 
     if (keyval == GDK_KEY_t || keyval == GDK_KEY_T) {
         on_new_tab_clicked(NULL, app);
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_l || keyval == GDK_KEY_L) {
+        gtk_widget_grab_focus(app->address_entry);
+        gtk_editable_select_region(GTK_EDITABLE(app->address_entry), 0, -1);
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_r || keyval == GDK_KEY_R) {
+        on_reload_clicked(NULL, app);
         return TRUE;
     }
 
