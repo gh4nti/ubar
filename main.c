@@ -196,6 +196,8 @@ on_activate(GtkApplication *app, gpointer user_data)
 
     gtk_editable_set_text(GTK_EDITABLE(state->address_entry), "https://example.com");
     gtk_widget_set_hexpand(state->address_entry, TRUE);
+    gtk_widget_set_hexpand(web_view, TRUE);
+    gtk_widget_set_vexpand(web_view, TRUE);
 
     gtk_box_append(GTK_BOX(toolbar), state->back_button);
     gtk_box_append(GTK_BOX(toolbar), state->forward_button);
