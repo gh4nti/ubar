@@ -9,16 +9,23 @@ Tiny browser shell in C with GTK4 and WebKitGTK.
 - `webkitgtk-6.0`
 - `pkg-config`
 
+## Layout
+
+- `src/` application code
+- `include/` public headers
+- `assets/newtab/` new tab page HTML/CSS/JS
+- `build/` compiled output
+
 ## Build
 
 ```sh
-gcc main.c $(pkg-config --cflags --libs gtk4 webkitgtk-6.0) -o ubar
+make
 ```
 
 ## Run
 
 ```sh
-./ubar
+./build/ubar
 ```
 
-Current app opens one window on `about:blank`.
+Run from repo root so bundled assets under `build/assets/` are available.

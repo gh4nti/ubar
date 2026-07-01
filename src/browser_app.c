@@ -1,3 +1,5 @@
+#include "browser_app.h"
+
 #include <gtk/gtk.h>
 #include <string.h>
 #include <webkit/webkit.h>
@@ -8,45 +10,6 @@ typedef struct TabState TabState;
 static gboolean remove_tab_after_animation(gpointer user_data);
 static void on_new_tab_clicked(GtkButton *button, gpointer user_data);
 
-static const char *NEW_TAB_URI = "ubar://newtab/";
-static const char *NEW_TAB_HTML =
-    "<!doctype html>"
-    "<html lang=\"en\">"
-    "<head>"
-    "<meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    "<title>New Tab</title>"
-    "<style>"
-    "html,body{height:100%;margin:0;}"
-    "body{display:grid;place-items:center;background:#f7f5ef;color:#171717;"
-    "font-family:'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,serif;}"
-    ".wrap{text-align:center;}"
-    "#clock{font-size:clamp(64px,14vw,140px);font-weight:700;letter-spacing:-0.05em;line-height:0.95;}"
-    "#date{margin-top:14px;font-size:clamp(22px,3vw,34px);opacity:0.72;}"
-    "</style>"
-    "</head>"
-    "<body>"
-    "<div class=\"wrap\">"
-    "<div id=\"clock\">--:--:--</div>"
-    "<div id=\"date\">---</div>"
-    "</div>"
-    "<script>"
-    "const clock=document.getElementById('clock');"
-    "const dateEl=document.getElementById('date');"
-    "const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];"
-    "const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];"
-    "function pad(v){return String(v).padStart(2,'0');}"
-    "function render(){"
-    "const now=new Date();"
-    "clock.textContent=`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;"
-    "dateEl.textContent=`${days[now.getDay()]}, ${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`;"
-    "}"
-    "render();"
-    "setInterval(render,1000);"
-    "</script>"
-    "</body>"
-    "</html>";
-
 struct AppState {
     GtkWidget *window;
     GtkWidget *notebook;
@@ -55,6 +18,7 @@ struct AppState {
     GtkWidget *reload_button;
     GtkWidget *address_entry;
     GtkWidget *new_tab_button;
+    char *new_tab_uri;
 };
 
 struct TabState {
@@ -67,6 +31,39 @@ struct TabState {
     WebKitWebView *web_view;
     gboolean is_loading;
 };
+
+static char *
+build_new_tab_uri(void)
+{
+    char *exe_path;
+    char *exe_dir;
+    char *asset_path;
+    char *uri;
+
+    exe_path = g_file_read_link("/proc/self/exe", NULL);
+    if (exe_path == NULL) {
+        return g_filename_to_uri("assets/newtab/index.html", NULL, NULL);
+    }
+
+    exe_dir = g_path_get_dirname(exe_path);
+    asset_path = g_build_filename(exe_dir, "assets", "newtab", "index.html", NULL);
+    uri = g_filename_to_uri(asset_path, NULL, NULL);
+
+    g_free(asset_path);
+    g_free(exe_dir);
+    g_free(exe_path);
+
+    return uri;
+}
+
+static gboolean
+tab_is_new_tab(TabState *tab)
+{
+    const char *uri;
+
+    uri = webkit_web_view_get_uri(tab->web_view);
+    return uri != NULL && g_strcmp0(uri, tab->app->new_tab_uri) == 0;
+}
 
 static char *
 normalize_uri(const char *input)
@@ -113,6 +110,17 @@ get_current_tab(AppState *app)
 
     page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app->notebook), page_num);
     return get_tab_from_page(page);
+}
+
+static void
+free_app_state(GtkWidget *window, gpointer user_data)
+{
+    AppState *app;
+
+    (void)window;
+    app = user_data;
+    g_free(app->new_tab_uri);
+    g_free(app);
 }
 
 static void
@@ -198,6 +206,11 @@ update_tab_label(TabState *tab)
         return;
     }
 
+    if (tab_is_new_tab(tab)) {
+        gtk_label_set_text(GTK_LABEL(tab->title_label), "New Tab");
+        return;
+    }
+
     uri = webkit_web_view_get_uri(tab->web_view);
     if (uri != NULL && *uri != '\0') {
         gtk_label_set_text(GTK_LABEL(tab->title_label), uri);
@@ -222,7 +235,7 @@ sync_window_to_tab(TabState *tab)
     uri = webkit_web_view_get_uri(tab->web_view);
     title = webkit_web_view_get_title(tab->web_view);
 
-    if (uri != NULL && g_str_has_prefix(uri, NEW_TAB_URI)) {
+    if (tab_is_new_tab(tab)) {
         gtk_editable_set_text(GTK_EDITABLE(app->address_entry), "");
     } else {
         gtk_editable_set_text(GTK_EDITABLE(app->address_entry), uri != NULL ? uri : "");
@@ -252,9 +265,9 @@ configure_web_view(WebKitWebView *web_view)
 }
 
 static void
-load_new_tab_page(WebKitWebView *web_view)
+load_new_tab_page(TabState *tab)
 {
-    webkit_web_view_load_html(web_view, NEW_TAB_HTML, NEW_TAB_URI);
+    webkit_web_view_load_uri(tab->web_view, tab->app->new_tab_uri);
 }
 
 static void
@@ -338,6 +351,11 @@ on_reload_clicked(GtkButton *button, gpointer user_data)
 
     if (tab->is_loading) {
         webkit_web_view_stop_loading(tab->web_view);
+        return;
+    }
+
+    if (tab_is_new_tab(tab)) {
+        load_new_tab_page(tab);
         return;
     }
 
@@ -557,12 +575,12 @@ static TabState *
 create_tab(AppState *app, const char *uri)
 {
     GtkGesture *middle_click;
-    GtkWidget *web_view;
+    GtkWidget *close_button;
     GtkWidget *favicon_image;
     GtkWidget *tab_box;
-    GtkWidget *close_button;
     GtkWidget *tab_revealer;
     GtkWidget *title_label;
+    GtkWidget *web_view;
     TabState *tab;
 
     tab = g_new0(TabState, 1);
@@ -588,13 +606,16 @@ create_tab(AppState *app, const char *uri)
     gtk_widget_set_margin_start(tab_box, 10);
     gtk_widget_set_margin_end(tab_box, 10);
     gtk_widget_set_size_request(tab_box, 220, -1);
+
     close_button = gtk_button_new_from_icon_name("window-close-symbolic");
     gtk_button_set_has_frame(GTK_BUTTON(close_button), FALSE);
     gtk_widget_set_focusable(close_button, FALSE);
     gtk_widget_set_halign(close_button, GTK_ALIGN_END);
+
     gtk_box_append(GTK_BOX(tab_box), favicon_image);
     gtk_box_append(GTK_BOX(tab_box), title_label);
     gtk_box_append(GTK_BOX(tab_box), close_button);
+
     tab_revealer = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(tab_revealer),
                                      GTK_REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
@@ -627,8 +648,8 @@ create_tab(AppState *app, const char *uri)
 
     update_tab_favicon(tab);
     update_tab_label(tab);
-    if (g_strcmp0(uri, NEW_TAB_URI) == 0) {
-        load_new_tab_page(tab->web_view);
+    if (g_strcmp0(uri, app->new_tab_uri) == 0) {
+        load_new_tab_page(tab);
     } else {
         webkit_web_view_load_uri(tab->web_view, uri);
     }
@@ -646,29 +667,29 @@ on_new_tab_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     app = user_data;
-    tab = create_tab(app, NEW_TAB_URI);
+    tab = create_tab(app, app->new_tab_uri);
     page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), page_num);
 }
 
 static void
-on_activate(GtkApplication *app, gpointer user_data)
+on_activate(GtkApplication *gtk_app, gpointer user_data)
 {
     GtkEventController *key_controller;
-    GtkWidget *window;
-    GtkWidget *vbox;
     GtkWidget *toolbar;
-    AppState *state;
+    GtkWidget *vbox;
+    AppState *app;
     TabState *tab;
     int page_num;
 
     (void)user_data;
 
-    state = g_new0(AppState, 1);
+    app = g_new0(AppState, 1);
+    app->new_tab_uri = build_new_tab_uri();
 
-    window = gtk_application_window_new(app);
-    gtk_window_set_default_size(GTK_WINDOW(window), 1200, 800);
-    gtk_window_set_title(GTK_WINDOW(window), "ubar");
+    app->window = gtk_application_window_new(gtk_app);
+    gtk_window_set_default_size(GTK_WINDOW(app->window), 1200, 800);
+    gtk_window_set_title(GTK_WINDOW(app->window), "ubar");
 
     vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -677,51 +698,51 @@ on_activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_margin_start(toolbar, 6);
     gtk_widget_set_margin_end(toolbar, 6);
 
-    state->window = window;
-    state->back_button = gtk_button_new_from_icon_name("go-previous-symbolic");
-    state->forward_button = gtk_button_new_from_icon_name("go-next-symbolic");
-    state->reload_button = gtk_button_new_from_icon_name("view-refresh-symbolic");
-    state->address_entry = gtk_entry_new();
-    state->notebook = gtk_notebook_new();
-    state->new_tab_button = gtk_button_new_from_icon_name("list-add-symbolic");
+    app->back_button = gtk_button_new_from_icon_name("go-previous-symbolic");
+    app->forward_button = gtk_button_new_from_icon_name("go-next-symbolic");
+    app->reload_button = gtk_button_new_from_icon_name("view-refresh-symbolic");
+    app->address_entry = gtk_entry_new();
+    app->notebook = gtk_notebook_new();
+    app->new_tab_button = gtk_button_new_from_icon_name("list-add-symbolic");
 
-    gtk_button_set_has_frame(GTK_BUTTON(state->new_tab_button), FALSE);
-    gtk_widget_set_hexpand(state->address_entry, TRUE);
-    gtk_notebook_set_scrollable(GTK_NOTEBOOK(state->notebook), TRUE);
-    gtk_notebook_set_action_widget(GTK_NOTEBOOK(state->notebook),
-                                   state->new_tab_button,
+    gtk_button_set_has_frame(GTK_BUTTON(app->new_tab_button), FALSE);
+    gtk_widget_set_hexpand(app->address_entry, TRUE);
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(app->notebook), TRUE);
+    gtk_notebook_set_action_widget(GTK_NOTEBOOK(app->notebook),
+                                   app->new_tab_button,
                                    GTK_PACK_END);
 
-    gtk_box_append(GTK_BOX(toolbar), state->back_button);
-    gtk_box_append(GTK_BOX(toolbar), state->forward_button);
-    gtk_box_append(GTK_BOX(toolbar), state->reload_button);
-    gtk_box_append(GTK_BOX(toolbar), state->address_entry);
+    gtk_box_append(GTK_BOX(toolbar), app->back_button);
+    gtk_box_append(GTK_BOX(toolbar), app->forward_button);
+    gtk_box_append(GTK_BOX(toolbar), app->reload_button);
+    gtk_box_append(GTK_BOX(toolbar), app->address_entry);
 
     gtk_box_append(GTK_BOX(vbox), toolbar);
-    gtk_box_append(GTK_BOX(vbox), state->notebook);
-    gtk_window_set_child(GTK_WINDOW(window), vbox);
+    gtk_box_append(GTK_BOX(vbox), app->notebook);
+    gtk_window_set_child(GTK_WINDOW(app->window), vbox);
+
     key_controller = gtk_event_controller_key_new();
-    gtk_widget_add_controller(window, key_controller);
+    gtk_widget_add_controller(app->window, key_controller);
 
-    g_signal_connect(state->back_button, "clicked", G_CALLBACK(on_back_clicked), state);
-    g_signal_connect(state->forward_button, "clicked", G_CALLBACK(on_forward_clicked), state);
-    g_signal_connect(state->reload_button, "clicked", G_CALLBACK(on_reload_clicked), state);
-    g_signal_connect(state->address_entry, "activate", G_CALLBACK(on_address_activate), state);
-    g_signal_connect(state->new_tab_button, "clicked", G_CALLBACK(on_new_tab_clicked), state);
-    g_signal_connect(state->notebook, "switch-page", G_CALLBACK(on_switch_page), state);
-    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_window_key_pressed), state);
-    g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), state);
+    g_signal_connect(app->back_button, "clicked", G_CALLBACK(on_back_clicked), app);
+    g_signal_connect(app->forward_button, "clicked", G_CALLBACK(on_forward_clicked), app);
+    g_signal_connect(app->reload_button, "clicked", G_CALLBACK(on_reload_clicked), app);
+    g_signal_connect(app->address_entry, "activate", G_CALLBACK(on_address_activate), app);
+    g_signal_connect(app->new_tab_button, "clicked", G_CALLBACK(on_new_tab_clicked), app);
+    g_signal_connect(app->notebook, "switch-page", G_CALLBACK(on_switch_page), app);
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_window_key_pressed), app);
+    g_signal_connect(app->window, "destroy", G_CALLBACK(free_app_state), app);
 
-    tab = create_tab(state, NEW_TAB_URI);
-    page_num = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), tab->page);
-    gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), page_num);
+    tab = create_tab(app, app->new_tab_uri);
+    page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), page_num);
     sync_window_to_tab(tab);
 
-    gtk_window_present(GTK_WINDOW(window));
+    gtk_window_present(GTK_WINDOW(app->window));
 }
 
 int
-main(int argc, char *argv[])
+browser_app_run(int argc, char *argv[])
 {
     GtkApplication *app;
     int status;

@@ -1,0 +1,30 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  background: #f7f5ef;
+  color: #171717;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+}
+
+.wrap {
+  text-align: center;
+}
+
+#clock {
+  font-size: clamp(64px, 14vw, 140px);
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+}
+
+#date {
+  margin-top: 14px;
+  font-size: clamp(22px, 3vw, 34px);
+  opacity: 0.72;
+}
