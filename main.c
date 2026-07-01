@@ -8,6 +8,45 @@ typedef struct TabState TabState;
 static gboolean remove_tab_after_animation(gpointer user_data);
 static void on_new_tab_clicked(GtkButton *button, gpointer user_data);
 
+static const char *NEW_TAB_URI = "ubar://newtab/";
+static const char *NEW_TAB_HTML =
+    "<!doctype html>"
+    "<html lang=\"en\">"
+    "<head>"
+    "<meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    "<title>New Tab</title>"
+    "<style>"
+    "html,body{height:100%;margin:0;}"
+    "body{display:grid;place-items:center;background:#f7f5ef;color:#171717;"
+    "font-family:'Iowan Old Style','Palatino Linotype','Book Antiqua',Palatino,serif;}"
+    ".wrap{text-align:center;}"
+    "#clock{font-size:clamp(64px,14vw,140px);font-weight:700;letter-spacing:-0.05em;line-height:0.95;}"
+    "#date{margin-top:14px;font-size:clamp(22px,3vw,34px);opacity:0.72;}"
+    "</style>"
+    "</head>"
+    "<body>"
+    "<div class=\"wrap\">"
+    "<div id=\"clock\">--:--:--</div>"
+    "<div id=\"date\">---</div>"
+    "</div>"
+    "<script>"
+    "const clock=document.getElementById('clock');"
+    "const dateEl=document.getElementById('date');"
+    "const days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];"
+    "const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];"
+    "function pad(v){return String(v).padStart(2,'0');}"
+    "function render(){"
+    "const now=new Date();"
+    "clock.textContent=`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;"
+    "dateEl.textContent=`${days[now.getDay()]}, ${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`;"
+    "}"
+    "render();"
+    "setInterval(render,1000);"
+    "</script>"
+    "</body>"
+    "</html>";
+
 struct AppState {
     GtkWidget *window;
     GtkWidget *notebook;
@@ -183,7 +222,11 @@ sync_window_to_tab(TabState *tab)
     uri = webkit_web_view_get_uri(tab->web_view);
     title = webkit_web_view_get_title(tab->web_view);
 
-    gtk_editable_set_text(GTK_EDITABLE(app->address_entry), uri != NULL ? uri : "about:blank");
+    if (uri != NULL && g_str_has_prefix(uri, NEW_TAB_URI)) {
+        gtk_editable_set_text(GTK_EDITABLE(app->address_entry), "");
+    } else {
+        gtk_editable_set_text(GTK_EDITABLE(app->address_entry), uri != NULL ? uri : "");
+    }
     gtk_widget_set_sensitive(app->back_button, webkit_web_view_can_go_back(tab->web_view));
     gtk_widget_set_sensitive(app->forward_button, webkit_web_view_can_go_forward(tab->web_view));
     gtk_button_set_icon_name(GTK_BUTTON(app->reload_button),
@@ -206,6 +249,12 @@ configure_web_view(WebKitWebView *web_view)
     webkit_settings_set_enable_2d_canvas_acceleration(settings, FALSE);
     webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
     webkit_settings_set_enable_developer_extras(settings, TRUE);
+}
+
+static void
+load_new_tab_page(WebKitWebView *web_view)
+{
+    webkit_web_view_load_html(web_view, NEW_TAB_HTML, NEW_TAB_URI);
 }
 
 static void
@@ -578,7 +627,11 @@ create_tab(AppState *app, const char *uri)
 
     update_tab_favicon(tab);
     update_tab_label(tab);
-    webkit_web_view_load_uri(tab->web_view, uri);
+    if (g_strcmp0(uri, NEW_TAB_URI) == 0) {
+        load_new_tab_page(tab->web_view);
+    } else {
+        webkit_web_view_load_uri(tab->web_view, uri);
+    }
     g_idle_add(reveal_tab_after_create, tab_revealer);
 
     return tab;
@@ -593,7 +646,7 @@ on_new_tab_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     app = user_data;
-    tab = create_tab(app, "about:blank");
+    tab = create_tab(app, NEW_TAB_URI);
     page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), page_num);
 }
@@ -659,7 +712,7 @@ on_activate(GtkApplication *app, gpointer user_data)
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_window_key_pressed), state);
     g_signal_connect_swapped(window, "destroy", G_CALLBACK(g_free), state);
 
-    tab = create_tab(state, "about:blank");
+    tab = create_tab(state, NEW_TAB_URI);
     page_num = gtk_notebook_page_num(GTK_NOTEBOOK(state->notebook), tab->page);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(state->notebook), page_num);
     sync_window_to_tab(tab);
