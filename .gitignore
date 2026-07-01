@@ -1,0 +1,8 @@
+ubar
+*.o
+
+.venv/
+.idea/
+.vscode/
+
+.DS_Store
