@@ -9,6 +9,7 @@ typedef struct {
     GtkWidget *reload_button;
     GtkWidget *address_entry;
     WebKitWebView *web_view;
+    gboolean is_loading;
 } AppState;
 
 static char *
@@ -85,6 +86,11 @@ on_reload_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     state = user_data;
+    if (state->is_loading) {
+        webkit_web_view_stop_loading(state->web_view);
+        return;
+    }
+
     webkit_web_view_reload(state->web_view);
 }
 
@@ -133,9 +139,12 @@ on_load_changed(WebKitWebView *web_view,
 
     (void)web_view;
     state = user_data;
+    state->is_loading = load_event == WEBKIT_LOAD_STARTED ||
+                        load_event == WEBKIT_LOAD_REDIRECTED ||
+                        load_event == WEBKIT_LOAD_COMMITTED;
 
     gtk_button_set_icon_name(GTK_BUTTON(state->reload_button),
-                             load_event == WEBKIT_LOAD_STARTED
+                             state->is_loading
                                  ? "process-stop-symbolic"
                                  : "view-refresh-symbolic");
     update_navigation(state);
