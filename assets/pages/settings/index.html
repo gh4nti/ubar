@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings</title>
+  <link rel="stylesheet" href="../shared/page.css">
+</head>
+<body>
+  <main class="page settings-layout">
+    <aside class="settings-nav">
+      <div class="eyebrow">Preferences</div>
+      <h1>Settings</h1>
+      <p>Small browser controls, Chrome-style basics.</p>
+    </aside>
+    <section class="settings-panel">
+      <article class="settings-card">
+        <h2>Startup</h2>
+        <label class="field">
+          <span>Homepage URL</span>
+          <input id="homepage-input" type="text" placeholder="https://example.com">
+        </label>
+        <div class="button-row">
+          <button id="save-homepage">Save homepage</button>
+          <button class="ghost" id="use-new-tab">Use new tab page</button>
+        </div>
+      </article>
+
+      <article class="settings-card">
+        <h2>Library</h2>
+        <div class="stats">
+          <div>
+            <strong id="history-count">0</strong>
+            <span>History entries</span>
+          </div>
+          <div>
+            <strong id="bookmark-count">0</strong>
+            <span>Bookmarks</span>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

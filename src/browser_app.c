@@ -1,6 +1,8 @@
 #include "browser_app.h"
+#include "browser_state.h"
 
 #include <gtk/gtk.h>
+#include <jsc/jsc.h>
 #include <string.h>
 #include <webkit/webkit.h>
 
@@ -9,6 +11,9 @@ typedef struct TabState TabState;
 
 static gboolean remove_tab_after_animation(gpointer user_data);
 static void on_new_tab_clicked(GtkButton *button, gpointer user_data);
+static TabState *get_tab_from_page(GtkWidget *page);
+static TabState *get_current_tab(AppState *app);
+static void load_new_tab_page(TabState *tab);
 
 struct AppState {
     GtkWidget *window;
@@ -18,7 +23,17 @@ struct AppState {
     GtkWidget *reload_button;
     GtkWidget *address_entry;
     GtkWidget *new_tab_button;
+    GtkWidget *bookmark_button;
+    GtkWidget *menu_button;
+    GtkWidget *home_menu_item;
+    GtkWidget *history_menu_item;
+    GtkWidget *bookmarks_menu_item;
+    GtkWidget *settings_menu_item;
     char *new_tab_uri;
+    char *history_uri;
+    char *bookmarks_uri;
+    char *settings_uri;
+    BrowserState *browser_state;
 };
 
 struct TabState {
@@ -33,7 +48,7 @@ struct TabState {
 };
 
 static char *
-build_new_tab_uri(void)
+build_asset_uri(const char *relative_path)
 {
     char *exe_path;
     char *exe_dir;
@@ -42,11 +57,11 @@ build_new_tab_uri(void)
 
     exe_path = g_file_read_link("/proc/self/exe", NULL);
     if (exe_path == NULL) {
-        return g_filename_to_uri("assets/newtab/index.html", NULL, NULL);
+        return g_filename_to_uri(relative_path, NULL, NULL);
     }
 
     exe_dir = g_path_get_dirname(exe_path);
-    asset_path = g_build_filename(exe_dir, "assets", "newtab", "index.html", NULL);
+    asset_path = g_build_filename(exe_dir, relative_path, NULL);
     uri = g_filename_to_uri(asset_path, NULL, NULL);
 
     g_free(asset_path);
@@ -57,12 +72,257 @@ build_new_tab_uri(void)
 }
 
 static gboolean
+tab_is_uri(TabState *tab, const char *uri)
+{
+    const char *current_uri;
+
+    current_uri = webkit_web_view_get_uri(tab->web_view);
+    return current_uri != NULL && g_strcmp0(current_uri, uri) == 0;
+}
+
+static gboolean
 tab_is_new_tab(TabState *tab)
+{
+    return tab_is_uri(tab, tab->app->new_tab_uri);
+}
+
+static gboolean
+tab_is_history_page(TabState *tab)
+{
+    return tab_is_uri(tab, tab->app->history_uri);
+}
+
+static gboolean
+tab_is_bookmarks_page(TabState *tab)
+{
+    return tab_is_uri(tab, tab->app->bookmarks_uri);
+}
+
+static gboolean
+tab_is_settings_page(TabState *tab)
+{
+    return tab_is_uri(tab, tab->app->settings_uri);
+}
+
+static gboolean
+tab_is_internal_page(TabState *tab)
+{
+    return tab_is_new_tab(tab) || tab_is_history_page(tab) || tab_is_bookmarks_page(tab) ||
+           tab_is_settings_page(tab);
+}
+
+static gboolean
+tab_can_bookmark(TabState *tab)
 {
     const char *uri;
 
+    if (tab == NULL || tab_is_internal_page(tab)) {
+        return FALSE;
+    }
+
     uri = webkit_web_view_get_uri(tab->web_view);
-    return uri != NULL && g_strcmp0(uri, tab->app->new_tab_uri) == 0;
+    return uri != NULL && *uri != '\0';
+}
+
+static char *
+format_timestamp(gint64 timestamp)
+{
+    GDateTime *dt;
+    char *text;
+
+    dt = g_date_time_new_from_unix_local(timestamp);
+    if (dt == NULL) {
+        return g_strdup("");
+    }
+
+    text = g_date_time_format(dt, "%a, %d %b %Y %H:%M");
+    g_date_time_unref(dt);
+    return text;
+}
+
+static void
+append_js_string(GString *out, const char *value)
+{
+    const char *p;
+
+    g_string_append_c(out, '\'');
+    for (p = value != NULL ? value : ""; *p != '\0'; p++) {
+        if (*p == '\\' || *p == '\'') {
+            g_string_append_c(out, '\\');
+        }
+        if (*p == '\n' || *p == '\r') {
+            g_string_append(out, "\\n");
+            continue;
+        }
+        g_string_append_c(out, *p);
+    }
+    g_string_append_c(out, '\'');
+}
+
+static char *
+build_history_script(BrowserState *state)
+{
+    GPtrArray *items;
+    GString *script;
+    guint i;
+
+    items = browser_state_get_history(state);
+    script = g_string_new("window.ubarRenderHistory({items:[");
+
+    for (i = 0; i < items->len; i++) {
+        BrowserHistoryEntry *entry;
+        char *time_text;
+
+        entry = g_ptr_array_index(items, i);
+        time_text = format_timestamp(entry->timestamp);
+        if (i > 0) {
+            g_string_append_c(script, ',');
+        }
+        g_string_append(script, "{title:");
+        append_js_string(script, entry->title);
+        g_string_append(script, ",uri:");
+        append_js_string(script, entry->uri);
+        g_string_append(script, ",time:");
+        append_js_string(script, time_text);
+        g_string_append(script, "}");
+        g_free(time_text);
+    }
+
+    g_string_append(script, "]});");
+    return g_string_free(script, FALSE);
+}
+
+static char *
+build_bookmarks_script(BrowserState *state)
+{
+    GPtrArray *items;
+    GString *script;
+    guint i;
+
+    items = browser_state_get_bookmarks(state);
+    script = g_string_new("window.ubarRenderBookmarks({items:[");
+
+    for (i = 0; i < items->len; i++) {
+        BrowserBookmarkEntry *entry;
+
+        entry = g_ptr_array_index(items, i);
+        if (i > 0) {
+            g_string_append_c(script, ',');
+        }
+        g_string_append(script, "{title:");
+        append_js_string(script, entry->title);
+        g_string_append(script, ",uri:");
+        append_js_string(script, entry->uri);
+        g_string_append(script, "}");
+    }
+
+    g_string_append(script, "]});");
+    return g_string_free(script, FALSE);
+}
+
+static char *
+build_settings_script(BrowserState *state)
+{
+    GString *script;
+
+    script = g_string_new("window.ubarRenderSettings({homepageUri:");
+    append_js_string(script, browser_state_get_homepage_uri(state));
+    g_string_append_printf(script,
+                           ",historyCount:%u,bookmarkCount:%u});",
+                           browser_state_get_history(state)->len,
+                           browser_state_get_bookmarks(state)->len);
+    return g_string_free(script, FALSE);
+}
+
+static void
+evaluate_script(WebKitWebView *web_view, const char *script, const char *source_uri)
+{
+    webkit_web_view_evaluate_javascript(web_view, script, -1, NULL, source_uri, NULL, NULL, NULL);
+}
+
+static void
+render_internal_page(TabState *tab)
+{
+    char *script;
+
+    if (tab_is_history_page(tab)) {
+        script = build_history_script(tab->app->browser_state);
+        evaluate_script(tab->web_view, script, tab->app->history_uri);
+        g_free(script);
+        return;
+    }
+
+    if (tab_is_bookmarks_page(tab)) {
+        script = build_bookmarks_script(tab->app->browser_state);
+        evaluate_script(tab->web_view, script, tab->app->bookmarks_uri);
+        g_free(script);
+        return;
+    }
+
+    if (tab_is_settings_page(tab)) {
+        script = build_settings_script(tab->app->browser_state);
+        evaluate_script(tab->web_view, script, tab->app->settings_uri);
+        g_free(script);
+    }
+}
+
+static void
+refresh_internal_pages(AppState *app)
+{
+    int page_count;
+    int i;
+
+    page_count = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app->notebook));
+    for (i = 0; i < page_count; i++) {
+        GtkWidget *page;
+        TabState *tab;
+
+        page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app->notebook), i);
+        tab = get_tab_from_page(page);
+        if (tab != NULL && (tab_is_history_page(tab) || tab_is_bookmarks_page(tab) ||
+                            tab_is_settings_page(tab))) {
+            render_internal_page(tab);
+        }
+    }
+}
+
+static void
+update_bookmark_button(AppState *app)
+{
+    TabState *tab;
+    const char *uri;
+
+    tab = get_current_tab(app);
+    if (!tab_can_bookmark(tab)) {
+        gtk_widget_set_sensitive(app->bookmark_button, FALSE);
+        gtk_button_set_icon_name(GTK_BUTTON(app->bookmark_button), "bookmark-new-symbolic");
+        return;
+    }
+
+    uri = webkit_web_view_get_uri(tab->web_view);
+    gtk_widget_set_sensitive(app->bookmark_button, TRUE);
+    gtk_button_set_icon_name(GTK_BUTTON(app->bookmark_button),
+                             browser_state_is_bookmarked(app->browser_state, uri)
+                                 ? "starred-symbolic"
+                                 : "bookmark-new-symbolic");
+}
+
+static void
+load_uri_in_current_tab(AppState *app, const char *uri)
+{
+    TabState *tab;
+
+    tab = get_current_tab(app);
+    if (tab == NULL) {
+        return;
+    }
+
+    if (g_strcmp0(uri, app->new_tab_uri) == 0) {
+        load_new_tab_page(tab);
+        return;
+    }
+
+    webkit_web_view_load_uri(tab->web_view, uri);
 }
 
 static char *
@@ -120,6 +380,10 @@ free_app_state(GtkWidget *window, gpointer user_data)
     (void)window;
     app = user_data;
     g_free(app->new_tab_uri);
+    g_free(app->history_uri);
+    g_free(app->bookmarks_uri);
+    g_free(app->settings_uri);
+    browser_state_free(app->browser_state);
     g_free(app);
 }
 
@@ -211,6 +475,21 @@ update_tab_label(TabState *tab)
         return;
     }
 
+    if (tab_is_history_page(tab)) {
+        gtk_label_set_text(GTK_LABEL(tab->title_label), "History");
+        return;
+    }
+
+    if (tab_is_bookmarks_page(tab)) {
+        gtk_label_set_text(GTK_LABEL(tab->title_label), "Bookmarks");
+        return;
+    }
+
+    if (tab_is_settings_page(tab)) {
+        gtk_label_set_text(GTK_LABEL(tab->title_label), "Settings");
+        return;
+    }
+
     uri = webkit_web_view_get_uri(tab->web_view);
     if (uri != NULL && *uri != '\0') {
         gtk_label_set_text(GTK_LABEL(tab->title_label), uri);
@@ -247,6 +526,7 @@ sync_window_to_tab(TabState *tab)
                                  ? "process-stop-symbolic"
                                  : "view-refresh-symbolic");
     gtk_window_set_title(GTK_WINDOW(app->window), title != NULL ? title : "ubar");
+    update_bookmark_button(app);
 }
 
 static void
@@ -359,6 +639,11 @@ on_reload_clicked(GtkButton *button, gpointer user_data)
         return;
     }
 
+    if (tab_is_history_page(tab) || tab_is_bookmarks_page(tab) || tab_is_settings_page(tab)) {
+        webkit_web_view_load_uri(tab->web_view, webkit_web_view_get_uri(tab->web_view));
+        return;
+    }
+
     webkit_web_view_reload(tab->web_view);
 }
 
@@ -412,6 +697,65 @@ on_favicon_changed(WebKitWebView *web_view, GParamSpec *pspec, gpointer user_dat
 }
 
 static void
+on_script_message_received(WebKitUserContentManager *manager,
+                           JSCValue *value,
+                           gpointer user_data)
+{
+    AppState *app;
+    TabState *tab;
+    char *message;
+    char *decoded;
+    char *normalized;
+    const char *current_title;
+    const char *current_uri;
+
+    (void)manager;
+    tab = user_data;
+    app = tab->app;
+    if (!jsc_value_is_string(value)) {
+        return;
+    }
+
+    message = jsc_value_to_string(value);
+    if (message == NULL) {
+        return;
+    }
+
+    if (g_str_has_prefix(message, "open:")) {
+        decoded = g_uri_unescape_string(message + 5, NULL);
+        if (decoded != NULL) {
+            load_uri_in_current_tab(app, decoded);
+        }
+        g_free(decoded);
+    } else if (g_str_has_prefix(message, "delete-bookmark:")) {
+        decoded = g_uri_unescape_string(message + 16, NULL);
+        if (decoded != NULL && browser_state_remove_bookmark(app->browser_state, decoded)) {
+            refresh_internal_pages(app);
+            update_bookmark_button(app);
+        }
+        g_free(decoded);
+    } else if (g_str_has_prefix(message, "save-homepage:")) {
+        decoded = g_uri_unescape_string(message + 14, NULL);
+        normalized = normalize_uri(decoded);
+        browser_state_set_homepage_uri(app->browser_state, normalized != NULL ? normalized : "");
+        refresh_internal_pages(app);
+        g_free(normalized);
+        g_free(decoded);
+    } else if (g_strcmp0(message, "clear-history") == 0) {
+        browser_state_clear_history(app->browser_state);
+        refresh_internal_pages(app);
+    }
+
+    current_title = webkit_web_view_get_title(tab->web_view);
+    current_uri = webkit_web_view_get_uri(tab->web_view);
+    if (current_uri != NULL && current_title != NULL) {
+        update_tab_label(tab);
+    }
+
+    g_free(message);
+}
+
+static void
 on_load_changed(WebKitWebView *web_view,
                 WebKitLoadEvent load_event,
                 gpointer user_data)
@@ -423,6 +767,21 @@ on_load_changed(WebKitWebView *web_view,
     tab->is_loading = load_event == WEBKIT_LOAD_STARTED ||
                       load_event == WEBKIT_LOAD_REDIRECTED ||
                       load_event == WEBKIT_LOAD_COMMITTED;
+
+    if (load_event == WEBKIT_LOAD_FINISHED) {
+        const char *title;
+        const char *uri;
+
+        title = webkit_web_view_get_title(tab->web_view);
+        uri = webkit_web_view_get_uri(tab->web_view);
+
+        if (tab_is_history_page(tab) || tab_is_bookmarks_page(tab) || tab_is_settings_page(tab)) {
+            render_internal_page(tab);
+        } else if (!tab_is_new_tab(tab) && uri != NULL && *uri != '\0') {
+            browser_state_add_history(tab->app->browser_state, title != NULL ? title : uri, uri);
+            refresh_internal_pages(tab->app);
+        }
+    }
 
     if (tab == get_current_tab(tab->app)) {
         sync_window_to_tab(tab);
@@ -484,6 +843,66 @@ on_switch_page(GtkNotebook *notebook,
     (void)user_data;
     tab = get_tab_from_page(page);
     sync_window_to_tab(tab);
+}
+
+static void
+on_bookmark_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *app;
+    TabState *tab;
+    const char *title;
+    const char *uri;
+
+    (void)button;
+    app = user_data;
+    tab = get_current_tab(app);
+    if (!tab_can_bookmark(tab)) {
+        return;
+    }
+
+    title = webkit_web_view_get_title(tab->web_view);
+    uri = webkit_web_view_get_uri(tab->web_view);
+    browser_state_toggle_bookmark(app->browser_state, title != NULL ? title : uri, uri);
+    update_bookmark_button(app);
+    refresh_internal_pages(app);
+}
+
+static void
+on_open_history_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    load_uri_in_current_tab(user_data, ((AppState *)user_data)->history_uri);
+}
+
+static void
+on_open_home_clicked(GtkButton *button, gpointer user_data)
+{
+    AppState *app;
+    const char *homepage_uri;
+
+    (void)button;
+    app = user_data;
+    homepage_uri = browser_state_get_homepage_uri(app->browser_state);
+    if (homepage_uri != NULL && *homepage_uri != '\0') {
+        load_uri_in_current_tab(app, homepage_uri);
+        return;
+    }
+
+    load_uri_in_current_tab(app, app->new_tab_uri);
+}
+
+static void
+on_open_bookmarks_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    load_uri_in_current_tab(user_data, ((AppState *)user_data)->bookmarks_uri);
+}
+
+static void
+on_open_settings_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    load_uri_in_current_tab(user_data, ((AppState *)user_data)->settings_uri);
 }
 
 static void
@@ -553,6 +972,16 @@ on_window_key_pressed(GtkEventControllerKey *controller,
         return TRUE;
     }
 
+    if (keyval == GDK_KEY_d || keyval == GDK_KEY_D) {
+        on_bookmark_clicked(NULL, app);
+        return TRUE;
+    }
+
+    if (keyval == GDK_KEY_h || keyval == GDK_KEY_H) {
+        on_open_history_clicked(NULL, app);
+        return TRUE;
+    }
+
     if (keyval == GDK_KEY_w || keyval == GDK_KEY_W) {
         close_tab(get_current_tab(app));
         return TRUE;
@@ -582,14 +1011,21 @@ create_tab(AppState *app, const char *uri)
     GtkWidget *title_label;
     GtkWidget *web_view;
     TabState *tab;
+    WebKitUserContentManager *content_manager;
 
     tab = g_new0(TabState, 1);
     tab->app = app;
 
-    web_view = webkit_web_view_new();
+    web_view = g_object_new(WEBKIT_TYPE_WEB_VIEW, NULL);
     tab->page = web_view;
     tab->web_view = WEBKIT_WEB_VIEW(web_view);
     configure_web_view(tab->web_view);
+    content_manager = webkit_web_view_get_user_content_manager(tab->web_view);
+    g_signal_connect(content_manager,
+                     "script-message-received::ubar",
+                     G_CALLBACK(on_script_message_received),
+                     tab);
+    webkit_user_content_manager_register_script_message_handler(content_manager, "ubar", NULL);
 
     favicon_image = gtk_image_new_from_icon_name("globe-symbolic");
     title_label = gtk_label_new("New Tab");
@@ -676,6 +1112,8 @@ static void
 on_activate(GtkApplication *gtk_app, gpointer user_data)
 {
     GtkEventController *key_controller;
+    GtkWidget *menu_box;
+    GtkWidget *menu_popover;
     GtkWidget *toolbar;
     GtkWidget *vbox;
     AppState *app;
@@ -685,7 +1123,11 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     (void)user_data;
 
     app = g_new0(AppState, 1);
-    app->new_tab_uri = build_new_tab_uri();
+    app->browser_state = browser_state_new();
+    app->new_tab_uri = build_asset_uri("assets/newtab/index.html");
+    app->history_uri = build_asset_uri("assets/pages/history/index.html");
+    app->bookmarks_uri = build_asset_uri("assets/pages/bookmarks/index.html");
+    app->settings_uri = build_asset_uri("assets/pages/settings/index.html");
 
     app->window = gtk_application_window_new(gtk_app);
     gtk_window_set_default_size(GTK_WINDOW(app->window), 1200, 800);
@@ -703,9 +1145,13 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     app->reload_button = gtk_button_new_from_icon_name("view-refresh-symbolic");
     app->address_entry = gtk_entry_new();
     app->notebook = gtk_notebook_new();
+    app->bookmark_button = gtk_button_new_from_icon_name("bookmark-new-symbolic");
     app->new_tab_button = gtk_button_new_from_icon_name("list-add-symbolic");
+    app->menu_button = gtk_menu_button_new();
 
     gtk_button_set_has_frame(GTK_BUTTON(app->new_tab_button), FALSE);
+    gtk_button_set_has_frame(GTK_BUTTON(app->bookmark_button), FALSE);
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(app->menu_button), "open-menu-symbolic");
     gtk_widget_set_hexpand(app->address_entry, TRUE);
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(app->notebook), TRUE);
     gtk_notebook_set_action_widget(GTK_NOTEBOOK(app->notebook),
@@ -716,6 +1162,8 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     gtk_box_append(GTK_BOX(toolbar), app->forward_button);
     gtk_box_append(GTK_BOX(toolbar), app->reload_button);
     gtk_box_append(GTK_BOX(toolbar), app->address_entry);
+    gtk_box_append(GTK_BOX(toolbar), app->bookmark_button);
+    gtk_box_append(GTK_BOX(toolbar), app->menu_button);
 
     gtk_box_append(GTK_BOX(vbox), toolbar);
     gtk_box_append(GTK_BOX(vbox), app->notebook);
@@ -724,11 +1172,33 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     key_controller = gtk_event_controller_key_new();
     gtk_widget_add_controller(app->window, key_controller);
 
+    menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_top(menu_box, 8);
+    gtk_widget_set_margin_bottom(menu_box, 8);
+    gtk_widget_set_margin_start(menu_box, 8);
+    gtk_widget_set_margin_end(menu_box, 8);
+    app->home_menu_item = gtk_button_new_with_label("Home");
+    app->history_menu_item = gtk_button_new_with_label("History");
+    app->bookmarks_menu_item = gtk_button_new_with_label("Bookmarks");
+    app->settings_menu_item = gtk_button_new_with_label("Settings");
+    gtk_box_append(GTK_BOX(menu_box), app->home_menu_item);
+    gtk_box_append(GTK_BOX(menu_box), app->history_menu_item);
+    gtk_box_append(GTK_BOX(menu_box), app->bookmarks_menu_item);
+    gtk_box_append(GTK_BOX(menu_box), app->settings_menu_item);
+    menu_popover = gtk_popover_new();
+    gtk_popover_set_child(GTK_POPOVER(menu_popover), menu_box);
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(app->menu_button), menu_popover);
+
     g_signal_connect(app->back_button, "clicked", G_CALLBACK(on_back_clicked), app);
     g_signal_connect(app->forward_button, "clicked", G_CALLBACK(on_forward_clicked), app);
     g_signal_connect(app->reload_button, "clicked", G_CALLBACK(on_reload_clicked), app);
     g_signal_connect(app->address_entry, "activate", G_CALLBACK(on_address_activate), app);
+    g_signal_connect(app->bookmark_button, "clicked", G_CALLBACK(on_bookmark_clicked), app);
     g_signal_connect(app->new_tab_button, "clicked", G_CALLBACK(on_new_tab_clicked), app);
+    g_signal_connect(app->home_menu_item, "clicked", G_CALLBACK(on_open_home_clicked), app);
+    g_signal_connect(app->history_menu_item, "clicked", G_CALLBACK(on_open_history_clicked), app);
+    g_signal_connect(app->bookmarks_menu_item, "clicked", G_CALLBACK(on_open_bookmarks_clicked), app);
+    g_signal_connect(app->settings_menu_item, "clicked", G_CALLBACK(on_open_settings_clicked), app);
     g_signal_connect(app->notebook, "switch-page", G_CALLBACK(on_switch_page), app);
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_window_key_pressed), app);
     g_signal_connect(app->window, "destroy", G_CALLBACK(free_app_state), app);
@@ -737,6 +1207,7 @@ on_activate(GtkApplication *gtk_app, gpointer user_data)
     page_num = gtk_notebook_page_num(GTK_NOTEBOOK(app->notebook), tab->page);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(app->notebook), page_num);
     sync_window_to_tab(tab);
+    update_bookmark_button(app);
 
     gtk_window_present(GTK_WINDOW(app->window));
 }

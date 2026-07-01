@@ -1,0 +1,182 @@
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f4f6fb;
+  color: #101828;
+  font-family: "Inter", "Segoe UI", sans-serif;
+}
+
+.page {
+  width: min(1040px, calc(100% - 48px));
+  margin: 32px auto;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #667085;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(32px, 4vw, 48px);
+}
+
+h2 {
+  font-size: 20px;
+  margin-bottom: 18px;
+}
+
+.list {
+  display: grid;
+  gap: 12px;
+}
+
+.row-card,
+.settings-card {
+  background: #fff;
+  border: 1px solid #e4e7ec;
+  border-radius: 18px;
+  padding: 18px 20px;
+  box-shadow: 0 12px 30px rgba(16, 24, 40, 0.06);
+}
+
+.row-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.row-link {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  color: #0f172a;
+  cursor: pointer;
+}
+
+.row-meta {
+  margin-top: 6px;
+  color: #667085;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.empty-state {
+  padding: 28px;
+  background: #fff;
+  border-radius: 18px;
+  border: 1px dashed #d0d5dd;
+  color: #667085;
+  text-align: center;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 10px 16px;
+  background: #101828;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.ghost {
+  background: #eef2ff;
+  color: #344054;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 24px;
+}
+
+.settings-nav {
+  padding: 16px 8px;
+}
+
+.settings-nav p {
+  margin-top: 12px;
+  color: #667085;
+  line-height: 1.5;
+}
+
+.settings-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  color: #344054;
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid #d0d5dd;
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-sizing: border-box;
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.stats strong {
+  display: block;
+  font-size: 32px;
+}
+
+.stats span {
+  color: #667085;
+}
+
+@media (max-width: 800px) {
+  .page {
+    width: min(100% - 24px, 1040px);
+    margin: 20px auto;
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+}
