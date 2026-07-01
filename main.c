@@ -231,6 +231,8 @@ on_activate(GtkApplication *app, gpointer user_data)
         WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
     webkit_settings_set_enable_webgl(settings, FALSE);
     webkit_settings_set_enable_2d_canvas_acceleration(settings, FALSE);
+    webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
+    webkit_settings_set_enable_developer_extras(settings, TRUE);
 
     gtk_editable_set_text(GTK_EDITABLE(state->address_entry), "about:blank");
     gtk_widget_set_hexpand(state->address_entry, TRUE);
