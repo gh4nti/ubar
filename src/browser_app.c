@@ -629,9 +629,15 @@ sync_window_to_tab(TabState *tab)
 static void
 configure_web_view(WebKitWebView *web_view)
 {
+    WebKitNetworkSession *network_session;
     WebKitSettings *settings;
+    WebKitWebsiteDataManager *data_manager;
 
     settings = webkit_web_view_get_settings(web_view);
+    network_session = webkit_web_view_get_network_session(web_view);
+    data_manager = webkit_network_session_get_website_data_manager(network_session);
+
+    webkit_website_data_manager_set_favicons_enabled(data_manager, TRUE);
     webkit_settings_set_hardware_acceleration_policy(
         settings,
         WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
