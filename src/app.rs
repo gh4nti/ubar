@@ -7,7 +7,6 @@ use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick,
     Image, Label, MenuButton, Notebook, Orientation, Popover, Revealer, RevealerTransitionType,
-    ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -338,6 +337,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     close_button.set_focusable(false);
 
     let tab_box = GtkBox::new(Orientation::Horizontal, 8);
+    tab_box.add_css_class("ubar-tab");
     tab_box.set_margin_top(6);
     tab_box.set_margin_bottom(6);
     tab_box.set_margin_start(10);
@@ -499,6 +499,27 @@ fn build_menu(app: &Rc<AppState>) {
 pub fn run() {
     let application = Application::builder().application_id(APP_ID).build();
     application.connect_activate(|gtk_app| {
+        let css = gtk4::CssProvider::new();
+        css.load_from_data(
+            "
+            .ubar-tab {
+                border-bottom: 2px solid transparent;
+                border-radius: 0;
+            }
+
+            .ubar-tab-active {
+                border-bottom-color: @accent_color;
+            }
+            ",
+        );
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+
         let window = ApplicationWindow::builder()
             .application(gtk_app)
             .default_width(1200)
@@ -519,16 +540,12 @@ pub fn run() {
         notebook.set_show_tabs(false);
 
         let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
-        let tab_bar_scroll = ScrolledWindow::new();
-        tab_bar_scroll.set_hexpand(true);
-        tab_bar_scroll.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
-        tab_bar_scroll.set_vscrollbar_policy(gtk4::PolicyType::Never);
-        tab_bar_scroll.set_child(Some(&tab_bar));
+        tab_bar.set_hexpand(true);
 
         let tabs_row = GtkBox::new(Orientation::Horizontal, 6);
         tabs_row.set_margin_start(6);
         tabs_row.set_margin_end(6);
-        tabs_row.append(&tab_bar_scroll);
+        tabs_row.append(&tab_bar);
         tabs_row.append(&new_tab_button);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
@@ -650,13 +667,10 @@ pub fn run() {
                             .data::<TabState>("tab-state") }
                             .map(|ptr| unsafe { ptr.as_ref().clone() })
                     {
-                        other_tab
-                            .tab_box
-                            .set_css_classes(if index == page_num {
-                                &["suggested-action"]
-                            } else {
-                                &[]
-                            });
+                        other_tab.tab_box.remove_css_class("ubar-tab-active");
+                        if index == page_num {
+                            other_tab.tab_box.add_css_class("ubar-tab-active");
+                        }
                     }
                 }
                 sync_window(&app_switch, &tab);
