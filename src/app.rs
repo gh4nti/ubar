@@ -6,7 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick,
-    Image, Label, MenuButton, Notebook, Orientation, Popover, Revealer, RevealerTransitionType,
+    Image, Label, MenuButton, Notebook, Orientation, Popover,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,11 +14,12 @@ use webkit6::prelude::*;
 use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
 
 const APP_ID: &str = "dev.ghanti.ubar";
+const TAB_WIDTH: i32 = 220;
+const TAB_ANIMATION_MS: u32 = 140;
 
 #[derive(Clone)]
 struct TabState {
     web_view: WebView,
-    tab_revealer: Revealer,
     tab_box: GtkBox,
     favicon: Image,
     title: Label,
@@ -227,6 +228,27 @@ fn render_internal_page(app: &Rc<AppState>, tab: &TabState) {
     }
 }
 
+fn animate_tab_width(tab_box: &GtkBox, from: i32, to: i32) {
+    let tab_box = tab_box.clone();
+    let start = std::time::Instant::now();
+    tab_box.set_size_request(from, -1);
+
+    glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        let elapsed = start.elapsed().as_millis() as u32;
+        let progress = (elapsed.min(TAB_ANIMATION_MS) as f64) / (TAB_ANIMATION_MS as f64);
+        let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+        let width = from as f64 + ((to - from) as f64 * eased);
+        tab_box.set_size_request(width.round() as i32, -1);
+
+        if elapsed >= TAB_ANIMATION_MS {
+            tab_box.set_size_request(to, -1);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
 fn refresh_internal_pages(app: &Rc<AppState>) {
     let total = app.notebook.n_pages();
     for index in 0..total {
@@ -256,6 +278,7 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     }
 
     tab.tab_box.set_sensitive(false);
+    animate_tab_width(&tab.tab_box, TAB_WIDTH, 0);
     let closing_current = current_page == Some(page_num);
     let next = if page_num == page_count - 1 {
         page_num.saturating_sub(1)
@@ -266,13 +289,12 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     let notebook = app.notebook.clone();
     let tab_bar = app.tab_bar.clone();
     let view = tab.web_view.clone();
-    let revealer = tab.tab_revealer.clone();
-    revealer.set_reveal_child(false);
-    glib::timeout_add_local_once(std::time::Duration::from_millis(140), move || {
+    let tab_box = tab.tab_box.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(TAB_ANIMATION_MS as u64), move || {
         if let Some(index) = notebook.page_num(&view) {
             notebook.remove_page(Some(index));
         }
-        tab_bar.remove(&revealer);
+        tab_bar.remove(&tab_box);
         if closing_current {
             notebook.set_current_page(Some(next));
         }
@@ -342,25 +364,18 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab_box.set_margin_bottom(6);
     tab_box.set_margin_start(10);
     tab_box.set_margin_end(10);
-    tab_box.set_size_request(220, -1);
+    tab_box.set_size_request(0, -1);
     tab_box.append(&favicon);
     tab_box.append(&title);
     tab_box.append(&close_button);
 
-    let tab_revealer = Revealer::new();
-    tab_revealer.set_transition_type(RevealerTransitionType::SlideRight);
-    tab_revealer.set_transition_duration(140);
-    tab_revealer.set_child(Some(&tab_box));
-    tab_revealer.set_reveal_child(false);
-
     web_view.set_hexpand(true);
     web_view.set_vexpand(true);
     app.notebook.append_page(&web_view, None::<&gtk4::Widget>);
-    app.tab_bar.append(&tab_revealer);
+    app.tab_bar.append(&tab_box);
 
     let tab = TabState {
         web_view: web_view.clone(),
-        tab_revealer: tab_revealer.clone(),
         tab_box: tab_box.clone(),
         favicon: favicon.clone(),
         title: title.clone(),
@@ -380,7 +395,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let app_middle = app.clone();
     let tab_middle = tab.clone();
     click.connect_pressed(move |_, _, _, _| close_tab(&app_middle, &tab_middle));
-    tab_revealer.add_controller(click);
+    tab_box.add_controller(click);
 
     let select_click = GestureClick::new();
     select_click.set_button(gdk::BUTTON_PRIMARY);
@@ -391,7 +406,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
             app_select.notebook.set_current_page(Some(index));
         }
     });
-    tab_revealer.add_controller(select_click);
+    tab_box.add_controller(select_click);
 
     let app_uri = app.clone();
     let tab_uri_ref = tab.clone();
@@ -450,9 +465,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     update_tab_favicon(&tab);
     update_tab_title(app, &tab);
     web_view.load_uri(uri);
-
-    let revealer = tab_revealer.clone();
-    glib::idle_add_local_once(move || revealer.set_reveal_child(true));
+    glib::idle_add_local_once(move || animate_tab_width(&tab_box, 0, TAB_WIDTH));
     tab
 }
 
