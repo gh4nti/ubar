@@ -18,8 +18,6 @@ const APP_ID: &str = "dev.ghanti.ubar";
 #[derive(Clone)]
 struct TabState {
     web_view: WebView,
-    tab_revealer: Revealer,
-    tab_box: GtkBox,
     favicon: Image,
     title: Label,
     loading: Rc<Cell<bool>>,
@@ -243,23 +241,70 @@ fn refresh_internal_pages(app: &Rc<AppState>) {
 }
 
 fn close_tab(app: &Rc<AppState>, tab: &TabState) {
-    let Some(_) = app.notebook.page_num(&tab.web_view) else {
+    let Some(page_num) = app.notebook.page_num(&tab.web_view) else {
         return;
     };
+    let current_page = app.notebook.current_page();
+    let page_count = app.notebook.n_pages();
 
-    if app.notebook.n_pages() == 1 {
+    if page_count == 1 {
         app.window.close();
         return;
     }
 
-    tab.tab_box.set_sensitive(false);
-    tab.web_view.set_visible(false);
+    let favicon = Image::from_icon_name("globe-symbolic");
+    if let Some(texture) = tab.web_view.favicon() {
+        favicon.set_paintable(Some(&texture));
+    }
+
+    let title = Label::new(Some(&tab.title.label()));
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title.set_max_width_chars(32);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+
+    let close_button = Button::from_icon_name("window-close-symbolic");
+    close_button.set_has_frame(false);
+    close_button.set_focusable(false);
+    close_button.set_sensitive(false);
+
+    let ghost_box = GtkBox::new(Orientation::Horizontal, 8);
+    ghost_box.set_margin_top(6);
+    ghost_box.set_margin_bottom(6);
+    ghost_box.set_margin_start(10);
+    ghost_box.set_margin_end(10);
+    ghost_box.set_size_request(220, -1);
+    ghost_box.append(&favicon);
+    ghost_box.append(&title);
+    ghost_box.append(&close_button);
+
+    let ghost_revealer = Revealer::new();
+    ghost_revealer.set_transition_type(RevealerTransitionType::SlideRight);
+    ghost_revealer.set_transition_duration(140);
+    ghost_revealer.set_child(Some(&ghost_box));
+    ghost_revealer.set_reveal_child(true);
+
+    let ghost_page = GtkBox::new(Orientation::Vertical, 0);
+    ghost_page.set_sensitive(false);
+
+    app.notebook.remove_page(Some(page_num));
+    app.notebook
+        .insert_page(&ghost_page, Some(&ghost_revealer), Some(page_num));
+
+    if current_page == Some(page_num) {
+        let next = if page_num == page_count - 1 {
+            page_num.saturating_sub(1)
+        } else {
+            page_num + 1
+        };
+        app.notebook.set_current_page(Some(next));
+    }
 
     let notebook = app.notebook.clone();
-    let view = tab.web_view.clone();
-    tab.tab_revealer.set_reveal_child(false);
+    let ghost_page_ref = ghost_page.clone();
+    glib::idle_add_local_once(move || ghost_revealer.set_reveal_child(false));
     glib::timeout_add_local_once(std::time::Duration::from_millis(140), move || {
-        if let Some(index) = notebook.page_num(&view) {
+        if let Some(index) = notebook.page_num(&ghost_page_ref) {
             notebook.remove_page(Some(index));
         }
     });
@@ -345,8 +390,6 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     let tab = TabState {
         web_view: web_view.clone(),
-        tab_revealer: tab_revealer.clone(),
-        tab_box: tab_box.clone(),
         favicon: favicon.clone(),
         title: title.clone(),
         loading: Rc::new(Cell::new(false)),
