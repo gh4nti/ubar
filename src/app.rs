@@ -259,15 +259,20 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     };
     app.notebook.set_current_page(Some(next));
     tab.tab_box.set_sensitive(false);
-    tab.tab_revealer.set_reveal_child(false);
+    tab.web_view.set_visible(false);
 
     let notebook = app.notebook.clone();
     let view = tab.web_view.clone();
-    glib::timeout_add_local_once(std::time::Duration::from_millis(140), move || {
+    tab.tab_revealer.connect_child_revealed_notify(move |revealer| {
+        if revealer.reveals_child() || revealer.is_child_revealed() {
+            return;
+        }
+
         if let Some(index) = notebook.page_num(&view) {
             notebook.remove_page(Some(index));
         }
     });
+    tab.tab_revealer.set_reveal_child(false);
 }
 
 fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
