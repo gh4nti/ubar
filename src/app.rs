@@ -243,7 +243,7 @@ fn refresh_internal_pages(app: &Rc<AppState>) {
 }
 
 fn close_tab(app: &Rc<AppState>, tab: &TabState) {
-    let Some(page_num) = app.notebook.page_num(&tab.web_view) else {
+    let Some(_) = app.notebook.page_num(&tab.web_view) else {
         return;
     };
 
@@ -252,12 +252,6 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
         return;
     }
 
-    let next = if page_num == app.notebook.n_pages() - 1 {
-        page_num.saturating_sub(1)
-    } else {
-        page_num
-    };
-    app.notebook.set_current_page(Some(next));
     tab.tab_box.set_sensitive(false);
     tab.web_view.set_visible(false);
 
