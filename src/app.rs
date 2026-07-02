@@ -7,6 +7,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick,
     Image, Label, MenuButton, Notebook, Orientation, Popover, Revealer, RevealerTransitionType,
+    ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,6 +19,8 @@ const APP_ID: &str = "dev.ghanti.ubar";
 #[derive(Clone)]
 struct TabState {
     web_view: WebView,
+    tab_revealer: Revealer,
+    tab_box: GtkBox,
     favicon: Image,
     title: Label,
     loading: Rc<Cell<bool>>,
@@ -26,6 +29,7 @@ struct TabState {
 struct AppState {
     window: ApplicationWindow,
     notebook: Notebook,
+    tab_bar: GtkBox,
     back_button: Button,
     forward_button: Button,
     reload_button: Button,
@@ -252,60 +256,26 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
         return;
     }
 
-    let favicon = Image::from_icon_name("globe-symbolic");
-    if let Some(texture) = tab.web_view.favicon() {
-        favicon.set_paintable(Some(&texture));
-    }
-
-    let title = Label::new(Some(&tab.title.label()));
-    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title.set_max_width_chars(32);
-    title.set_xalign(0.0);
-    title.set_hexpand(true);
-
-    let close_button = Button::from_icon_name("window-close-symbolic");
-    close_button.set_has_frame(false);
-    close_button.set_focusable(false);
-    close_button.set_sensitive(false);
-
-    let ghost_box = GtkBox::new(Orientation::Horizontal, 8);
-    ghost_box.set_margin_top(6);
-    ghost_box.set_margin_bottom(6);
-    ghost_box.set_margin_start(10);
-    ghost_box.set_margin_end(10);
-    ghost_box.set_size_request(220, -1);
-    ghost_box.append(&favicon);
-    ghost_box.append(&title);
-    ghost_box.append(&close_button);
-
-    let ghost_revealer = Revealer::new();
-    ghost_revealer.set_transition_type(RevealerTransitionType::SlideRight);
-    ghost_revealer.set_transition_duration(140);
-    ghost_revealer.set_child(Some(&ghost_box));
-    ghost_revealer.set_reveal_child(true);
-
-    let ghost_page = GtkBox::new(Orientation::Vertical, 0);
-    ghost_page.set_sensitive(false);
-
-    app.notebook.remove_page(Some(page_num));
-    app.notebook
-        .insert_page(&ghost_page, Some(&ghost_revealer), Some(page_num));
-
-    if current_page == Some(page_num) {
-        let next = if page_num == page_count - 1 {
-            page_num.saturating_sub(1)
-        } else {
-            page_num + 1
-        };
-        app.notebook.set_current_page(Some(next));
-    }
+    tab.tab_box.set_sensitive(false);
+    let closing_current = current_page == Some(page_num);
+    let next = if page_num == page_count - 1 {
+        page_num.saturating_sub(1)
+    } else {
+        page_num + 1
+    };
 
     let notebook = app.notebook.clone();
-    let ghost_page_ref = ghost_page.clone();
-    glib::idle_add_local_once(move || ghost_revealer.set_reveal_child(false));
+    let tab_bar = app.tab_bar.clone();
+    let view = tab.web_view.clone();
+    let revealer = tab.tab_revealer.clone();
+    revealer.set_reveal_child(false);
     glib::timeout_add_local_once(std::time::Duration::from_millis(140), move || {
-        if let Some(index) = notebook.page_num(&ghost_page_ref) {
+        if let Some(index) = notebook.page_num(&view) {
             notebook.remove_page(Some(index));
+        }
+        tab_bar.remove(&revealer);
+        if closing_current {
+            notebook.set_current_page(Some(next));
         }
     });
 }
@@ -385,11 +355,13 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     web_view.set_hexpand(true);
     web_view.set_vexpand(true);
-    app.notebook.append_page(&web_view, Some(&tab_revealer));
-    app.notebook.set_tab_reorderable(&web_view, true);
+    app.notebook.append_page(&web_view, None::<&gtk4::Widget>);
+    app.tab_bar.append(&tab_revealer);
 
     let tab = TabState {
         web_view: web_view.clone(),
+        tab_revealer: tab_revealer.clone(),
+        tab_box: tab_box.clone(),
         favicon: favicon.clone(),
         title: title.clone(),
         loading: Rc::new(Cell::new(false)),
@@ -409,6 +381,17 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let tab_middle = tab.clone();
     click.connect_pressed(move |_, _, _, _| close_tab(&app_middle, &tab_middle));
     tab_revealer.add_controller(click);
+
+    let select_click = GestureClick::new();
+    select_click.set_button(gdk::BUTTON_PRIMARY);
+    let app_select = app.clone();
+    let view_select = web_view.clone();
+    select_click.connect_pressed(move |_, _, _, _| {
+        if let Some(index) = app_select.notebook.page_num(&view_select) {
+            app_select.notebook.set_current_page(Some(index));
+        }
+    });
+    tab_revealer.add_controller(select_click);
 
     let app_uri = app.clone();
     let tab_uri_ref = tab.clone();
@@ -533,8 +516,20 @@ pub fn run() {
         menu_button.set_icon_name("open-menu-symbolic");
 
         let notebook = Notebook::new();
-        notebook.set_scrollable(true);
-        notebook.set_action_widget(&new_tab_button, gtk4::PackType::End);
+        notebook.set_show_tabs(false);
+
+        let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
+        let tab_bar_scroll = ScrolledWindow::new();
+        tab_bar_scroll.set_hexpand(true);
+        tab_bar_scroll.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
+        tab_bar_scroll.set_vscrollbar_policy(gtk4::PolicyType::Never);
+        tab_bar_scroll.set_child(Some(&tab_bar));
+
+        let tabs_row = GtkBox::new(Orientation::Horizontal, 6);
+        tabs_row.set_margin_start(6);
+        tabs_row.set_margin_end(6);
+        tabs_row.append(&tab_bar_scroll);
+        tabs_row.append(&new_tab_button);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
         toolbar.set_margin_top(6);
@@ -553,12 +548,14 @@ pub fn run() {
 
         let vbox = GtkBox::new(Orientation::Vertical, 0);
         vbox.append(&toolbar);
+        vbox.append(&tabs_row);
         vbox.append(&notebook);
         window.set_child(Some(&vbox));
 
         let app = Rc::new(AppState {
             window,
             notebook,
+            tab_bar,
             back_button,
             forward_button,
             reload_button,
@@ -641,11 +638,27 @@ pub fn run() {
         });
 
         let app_switch = app.clone();
-        app.notebook.connect_switch_page(move |_, page, _| {
+        app.notebook.connect_switch_page(move |notebook, page, page_num| {
             if let Some(tab) = unsafe { page
                 .data::<TabState>("tab-state") }
                 .map(|ptr| unsafe { ptr.as_ref().clone() })
             {
+                let total = notebook.n_pages();
+                for index in 0..total {
+                    if let Some(page) = notebook.nth_page(Some(index))
+                        && let Some(other_tab) = unsafe { page
+                            .data::<TabState>("tab-state") }
+                            .map(|ptr| unsafe { ptr.as_ref().clone() })
+                    {
+                        other_tab
+                            .tab_box
+                            .set_css_classes(if index == page_num {
+                                &["suggested-action"]
+                            } else {
+                                &[]
+                            });
+                    }
+                }
                 sync_window(&app_switch, &tab);
             }
         });
