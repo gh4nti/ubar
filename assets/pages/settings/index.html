@@ -7,15 +7,28 @@
   <link rel="stylesheet" href="../shared/page.css">
 </head>
 <body>
-  <main class="page settings-layout">
+  <main class="page settings-layout chrome-settings">
     <aside class="settings-nav">
       <div class="eyebrow">Preferences</div>
       <h1>Settings</h1>
-      <p>Small browser controls, Chrome-style basics.</p>
+      <p>Chrome-inspired controls for startup, privacy, site permissions, and browser data.</p>
+      <nav>
+        <a href="#startup">Startup</a>
+        <a href="#privacy">Privacy and security</a>
+        <a href="#site-settings">Site settings</a>
+        <a href="#appearance">Appearance</a>
+        <a href="#library">Library</a>
+      </nav>
     </aside>
+
     <section class="settings-panel">
-      <article class="settings-card">
-        <h2>Startup</h2>
+      <article class="settings-card" id="startup">
+        <div class="card-head">
+          <div>
+            <h2>On startup</h2>
+            <p>Choose where Home opens. Leave blank to use the new tab page.</p>
+          </div>
+        </div>
         <label class="field">
           <span>Homepage URL</span>
           <input id="homepage-input" type="text" placeholder="https://example.com">
@@ -26,8 +39,111 @@
         </div>
       </article>
 
-      <article class="settings-card">
-        <h2>Library</h2>
+      <article class="settings-card" id="privacy">
+        <div class="card-head">
+          <div>
+            <h2>Privacy and security</h2>
+            <p>Browser data is stored permanently on disk with an automatic backup. You can clear history manually.</p>
+          </div>
+        </div>
+        <div class="settings-list">
+          <div class="setting-row">
+            <div>
+              <strong>Safe defaults</strong>
+              <span>Permissions set to Ask are denied until you explicitly allow a site.</span>
+            </div>
+            <span class="pill">Enabled</span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Permanent library</strong>
+              <span>History and bookmarks are not capped and are saved atomically.</span>
+            </div>
+            <span class="pill">On</span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Developer extras</strong>
+              <span>WebKit developer tools remain enabled for debugging.</span>
+            </div>
+            <span class="pill">On</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="settings-card" id="site-settings">
+        <div class="card-head">
+          <div>
+            <h2>Site settings</h2>
+            <p>Control what websites can use. Site-specific rules override the default behavior.</p>
+          </div>
+        </div>
+
+        <h3>Default permissions</h3>
+        <div id="default-permissions" class="permission-grid"></div>
+
+        <h3>Customized sites</h3>
+        <div class="site-editor">
+          <label class="field">
+            <span>Site origin</span>
+            <input id="site-origin" type="text" placeholder="https://example.com">
+          </label>
+          <label class="field compact-field">
+            <span>Permission</span>
+            <select id="site-permission"></select>
+          </label>
+          <label class="field compact-field">
+            <span>Behavior</span>
+            <select id="site-value">
+              <option value="ask">Ask</option>
+              <option value="allow">Allow</option>
+              <option value="block">Block</option>
+            </select>
+          </label>
+          <button id="save-site-permission">Save site rule</button>
+        </div>
+        <section id="site-list" class="site-list"></section>
+      </article>
+
+      <article class="settings-card" id="appearance">
+        <div class="card-head">
+          <div>
+            <h2>Appearance</h2>
+            <p>The browser now uses a Chrome-like layout: tabs on top, address bar below, and window controls aligned with the tab strip.</p>
+          </div>
+        </div>
+        <div class="settings-list">
+          <div class="setting-row">
+            <div>
+              <strong>Tab bar</strong>
+              <span>Tabs are above the address bar.</span>
+            </div>
+            <span class="pill">Top</span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Address bar controls</strong>
+              <span>Back, forward, and reload are on the left. Bookmark and menu are on the right.</span>
+            </div>
+            <span class="pill">Updated</span>
+          </div>
+          <div class="setting-row">
+            <div>
+              <strong>Native title bar</strong>
+              <span>Removed, with window controls flushed into the tab bar.</span>
+            </div>
+            <span class="pill">Hidden</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="settings-card" id="library">
+        <div class="card-head">
+          <div>
+            <h2>Library</h2>
+            <p>Stored browser data overview.</p>
+          </div>
+        </div>
         <div class="stats">
           <div>
             <strong id="history-count">0</strong>
@@ -36,6 +152,10 @@
           <div>
             <strong id="bookmark-count">0</strong>
             <span>Bookmarks</span>
+          </div>
+          <div>
+            <strong id="site-count">0</strong>
+            <span>Site rules</span>
           </div>
         </div>
       </article>

@@ -180,3 +180,154 @@ button.ghost {
     grid-template-columns: 1fr;
   }
 }
+
+.chrome-settings h3 {
+  margin: 22px 0 12px;
+  font-size: 16px;
+}
+
+.settings-nav nav {
+  display: grid;
+  gap: 6px;
+  margin-top: 22px;
+}
+
+.settings-nav a {
+  color: #344054;
+  text-decoration: none;
+  padding: 10px 12px;
+  border-radius: 999px;
+}
+
+.settings-nav a:hover {
+  background: #eef2ff;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.card-head p,
+.setting-row span,
+.permission-row span,
+.site-rule span {
+  color: #667085;
+  line-height: 1.45;
+}
+
+.settings-list,
+.permission-grid,
+.site-list {
+  display: grid;
+  gap: 10px;
+}
+
+.setting-row,
+.permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid #eef2f6;
+}
+
+.setting-row:first-child,
+.permission-row:first-child {
+  border-top: 0;
+}
+
+.setting-row strong,
+.permission-row strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #344054 !important;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+
+select {
+  min-width: 116px;
+  border: 1px solid #d0d5dd;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: #fff;
+  color: #101828;
+  font: inherit;
+}
+
+.site-editor {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(150px, 180px) minmax(130px, 150px) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 16px;
+  border: 1px solid #e4e7ec;
+  border-radius: 16px;
+  background: #f8fafc;
+}
+
+.compact-field select {
+  width: 100%;
+}
+
+.site-card {
+  border: 1px solid #e4e7ec;
+  border-radius: 16px;
+  padding: 16px;
+  background: #fff;
+}
+
+.site-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.site-card-head strong {
+  word-break: break-all;
+}
+
+.site-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.site-rule {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 980px) {
+  .site-editor,
+  .site-rule-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+}
