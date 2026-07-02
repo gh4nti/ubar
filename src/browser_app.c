@@ -5,6 +5,9 @@
 #include <jsc/jsc.h>
 #include <string.h>
 #include <webkit/webkit.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 typedef struct AppState AppState;
 typedef struct TabState TabState;
@@ -59,10 +62,22 @@ build_asset_uri(const char *relative_path)
     char *asset_path;
     char *uri;
 
+#ifdef _WIN32
+    char module_path[MAX_PATH];
+    DWORD length;
+
+    length = GetModuleFileNameA(NULL, module_path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return g_filename_to_uri(relative_path, NULL, NULL);
+    }
+
+    exe_path = g_strdup(module_path);
+#else
     exe_path = g_file_read_link("/proc/self/exe", NULL);
     if (exe_path == NULL) {
         return g_filename_to_uri(relative_path, NULL, NULL);
     }
+#endif
 
     exe_dir = g_path_get_dirname(exe_path);
     asset_path = g_build_filename(exe_dir, relative_path, NULL);

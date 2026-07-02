@@ -22,17 +22,31 @@ History, bookmarks, and the homepage setting are stored permanently in the user 
 
 ## Build
 
+Linux:
+
 ```sh
-make
+make PLATFORM=linux
+```
+
+Windows from an MSYS2 MinGW shell:
+
+```sh
+make PLATFORM=windows CC=x86_64-w64-mingw32-gcc PKG_CONFIG=x86_64-w64-mingw32-pkg-config
 ```
 
 ## Run
 
 ```sh
-./build/ubar
+./build/linux/ubar
 ```
 
-Run from repo root so bundled assets under `build/assets/` are available.
+Windows binary path:
+
+```sh
+./build/windows/ubar.exe
+```
+
+Each platform gets its own output tree under `build/<platform>/`, including bundled assets beside the executable.
 
 
 ## Browser UI and settings changes
