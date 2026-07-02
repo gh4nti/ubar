@@ -228,20 +228,20 @@ fn render_internal_page(app: &Rc<AppState>, tab: &TabState) {
     }
 }
 
-fn animate_tab_width(tab_box: &GtkBox, from: i32, to: i32) {
+fn animate_tab_opacity(tab_box: &GtkBox, from: f64, to: f64) {
     let tab_box = tab_box.clone();
     let start = std::time::Instant::now();
-    tab_box.set_size_request(from, -1);
+    tab_box.set_opacity(from);
 
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let elapsed = start.elapsed().as_millis() as u32;
         let progress = (elapsed.min(TAB_ANIMATION_MS) as f64) / (TAB_ANIMATION_MS as f64);
         let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
-        let width = from as f64 + ((to - from) as f64 * eased);
-        tab_box.set_size_request(width.round() as i32, -1);
+        let opacity = from + ((to - from) * eased);
+        tab_box.set_opacity(opacity);
 
         if elapsed >= TAB_ANIMATION_MS {
-            tab_box.set_size_request(to, -1);
+            tab_box.set_opacity(to);
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -278,7 +278,7 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     }
 
     tab.tab_box.set_sensitive(false);
-    animate_tab_width(&tab.tab_box, TAB_WIDTH, 0);
+    animate_tab_opacity(&tab.tab_box, 1.0, 0.0);
     let closing_current = current_page == Some(page_num);
     let next = if page_num == page_count - 1 {
         page_num.saturating_sub(1)
@@ -364,7 +364,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab_box.set_margin_bottom(6);
     tab_box.set_margin_start(10);
     tab_box.set_margin_end(10);
-    tab_box.set_size_request(0, -1);
+    tab_box.set_size_request(TAB_WIDTH, -1);
+    tab_box.set_opacity(0.0);
     tab_box.append(&favicon);
     tab_box.append(&title);
     tab_box.append(&close_button);
@@ -465,7 +466,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     update_tab_favicon(&tab);
     update_tab_title(app, &tab);
     web_view.load_uri(uri);
-    glib::idle_add_local_once(move || animate_tab_width(&tab_box, 0, TAB_WIDTH));
+    glib::idle_add_local_once(move || animate_tab_opacity(&tab_box, 0.0, 1.0));
     tab
 }
 
