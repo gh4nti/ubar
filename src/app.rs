@@ -96,6 +96,29 @@ fn scroll_tab_strip_to_end(app: &AppState) {
     });
 }
 
+fn scroll_tab_into_view(app: &AppState, tab_box: &GtkBox) {
+    let scroller = app.tab_scroller.clone();
+    let tab_box = tab_box.clone();
+    glib::idle_add_local_once(move || {
+        let adj = scroller.hadjustment();
+        let x = f64::from(tab_box.allocation().x());
+        let width = f64::from(tab_box.allocation().width());
+        let start = adj.value();
+        let end = start + adj.page_size();
+
+        let target = if x < start {
+            x
+        } else if x + width > end {
+            x + width - adj.page_size()
+        } else {
+            return;
+        };
+
+        let clamped = target.clamp(adj.lower(), (adj.upper() - adj.page_size()).max(adj.lower()));
+        adj.set_value(clamped);
+    });
+}
+
 fn sync_tab_bar_order(app: &Rc<AppState>) {
     let total = app.notebook.n_pages();
     let mut previous: Option<GtkBox> = None;
@@ -123,6 +146,7 @@ fn select_tab(app: &Rc<AppState>, index: u32) {
             .map(|ptr| unsafe { ptr.as_ref().clone() })
     {
         sync_window(app, &tab);
+        scroll_tab_into_view(app, &tab.tab_box);
     }
 }
 
@@ -802,6 +826,7 @@ pub fn run() {
                     }
                 }
                 sync_window(&app_switch, &tab);
+                scroll_tab_into_view(&app_switch, &tab.tab_box);
             }
         });
 
