@@ -419,10 +419,10 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     let tab_box = GtkBox::new(Orientation::Horizontal, 8);
     tab_box.add_css_class("ubar-tab");
-    tab_box.set_margin_top(6);
-    tab_box.set_margin_bottom(6);
-    tab_box.set_margin_start(10);
-    tab_box.set_margin_end(10);
+    tab_box.set_margin_top(4);
+    tab_box.set_margin_bottom(4);
+    tab_box.set_margin_start(6);
+    tab_box.set_margin_end(6);
     tab_box.set_size_request(TAB_WIDTH, -1);
     tab_box.set_opacity(0.0);
     tab_box.append(&favicon);
@@ -608,14 +608,16 @@ pub fn run() {
         css.load_from_data(
             "
             .ubar-tab {
-                border-radius: 10px;
-                background: transparent;
+                padding: 3px 6px;
+                border-radius: 12px;
+                background: alpha(currentColor, 0.03);
+                box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);
                 transition: 140ms ease;
             }
 
             .ubar-tab-active {
-                background: alpha(@accent_color, 0.18);
-                box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.45);
+                background: alpha(@accent_color, 0.14);
+                box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.32);
             }
             ",
         );
