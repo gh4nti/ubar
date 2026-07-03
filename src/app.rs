@@ -7,7 +7,8 @@ use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, DragSource, DropTarget, Entry,
     EventControllerKey, EventControllerScroll, EventControllerScrollFlags, GestureClick, Image,
-    Label, MenuButton, Notebook, Orientation, Popover, ScrolledWindow,
+    HeaderBar, Label, MenuButton, Notebook, Orientation, PackType, Popover, ScrolledWindow,
+    WindowControls,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -690,6 +691,7 @@ pub fn run() {
         let new_tab_button = Button::from_icon_name("list-add-symbolic");
         let menu_button = MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
+        let window_controls = WindowControls::new(PackType::End);
 
         let notebook = Notebook::new();
         notebook.set_show_tabs(false);
@@ -714,10 +716,18 @@ pub fn run() {
         tab_scroller.add_controller(wheel_scroll);
 
         let tabs_row = GtkBox::new(Orientation::Horizontal, 6);
+        tabs_row.set_hexpand(true);
         tabs_row.set_margin_start(6);
         tabs_row.set_margin_end(6);
+        tabs_row.set_margin_top(4);
+        tabs_row.set_margin_bottom(4);
         tabs_row.append(&tab_scroller);
         tabs_row.append(&new_tab_button);
+
+        let header_bar = HeaderBar::new();
+        header_bar.set_show_title_buttons(false);
+        header_bar.set_title_widget(Some(&tabs_row));
+        header_bar.pack_end(&window_controls);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
         toolbar.set_margin_top(6);
@@ -736,8 +746,8 @@ pub fn run() {
 
         let vbox = GtkBox::new(Orientation::Vertical, 0);
         vbox.append(&toolbar);
-        vbox.append(&tabs_row);
         vbox.append(&notebook);
+        window.set_titlebar(Some(&header_bar));
         window.set_child(Some(&vbox));
 
         let app = Rc::new(AppState {
