@@ -8,8 +8,8 @@ use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, DragSource, DropTarget, Entry,
     Align,
     EventControllerKey, EventControllerScroll, EventControllerScrollFlags, GestureClick, Image,
-    HeaderBar, Label, MenuButton, Notebook, Orientation, PackType, Popover, ScrolledWindow,
-    WindowControls,
+    HeaderBar, Label, MenuButton, Notebook, Orientation, PackType, Popover, PositionType,
+    ScrolledWindow, WindowControls,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,6 +27,7 @@ struct TabState {
     tab_box: GtkBox,
     favicon: Image,
     title: Label,
+    audio_icon: Image,
     loading: Rc<Cell<bool>>,
 }
 
@@ -250,6 +251,18 @@ fn update_tab_favicon(tab: &TabState) {
     }
 }
 
+fn update_tab_audio(tab: &TabState) {
+    let playing = tab.web_view.is_playing_audio();
+    tab.audio_icon.set_visible(playing);
+    if playing {
+        tab.audio_icon.set_icon_name(Some(if tab.web_view.is_muted() {
+            "audio-volume-muted-symbolic"
+        } else {
+            "audio-volume-high-symbolic"
+        }));
+    }
+}
+
 fn evaluate_js(view: &WebView, script: &str, source_uri: &str) {
     view.evaluate_javascript(
         script,
@@ -387,6 +400,151 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     });
 }
 
+fn remove_tab_at(app: &Rc<AppState>, index: u32) {
+    let Some(page) = app.notebook.nth_page(Some(index)) else {
+        return;
+    };
+    let tab = unsafe { page.data::<TabState>("tab-state") }
+        .map(|ptr| unsafe { ptr.as_ref().clone() });
+    app.notebook.remove_page(Some(index));
+    if let Some(tab) = tab {
+        app.tab_bar.remove(&tab.tab_box);
+    }
+}
+
+fn duplicate_tab(app: &Rc<AppState>, source: &TabState) {
+    let uri = current_uri(&source.web_view);
+    let target = if uri.is_empty() {
+        app.new_tab_uri.clone()
+    } else {
+        uri
+    };
+    let tab = create_tab(app, &target);
+    if let Some(index) = app.notebook.page_num(&tab.web_view) {
+        app.notebook.set_current_page(Some(index));
+        sync_window(app, &tab);
+        scroll_tab_strip_to_end(app);
+    }
+}
+
+fn close_tabs_to_right(app: &Rc<AppState>, source: &TabState) {
+    let Some(current) = app.notebook.page_num(&source.web_view) else {
+        return;
+    };
+    let total = app.notebook.n_pages();
+    for index in (current + 1..total).rev() {
+        remove_tab_at(app, index);
+    }
+    sync_tab_bar_order(app);
+    select_tab(app, current);
+}
+
+fn close_other_tabs(app: &Rc<AppState>, source: &TabState) {
+    let Some(current) = app.notebook.page_num(&source.web_view) else {
+        return;
+    };
+    let total = app.notebook.n_pages();
+    for index in (current + 1..total).rev() {
+        remove_tab_at(app, index);
+    }
+    for index in (0..current).rev() {
+        remove_tab_at(app, index);
+    }
+    sync_tab_bar_order(app);
+    if let Some(index) = app.notebook.page_num(&source.web_view) {
+        select_tab(app, index);
+    }
+}
+
+fn open_tab_context_menu(app: &Rc<AppState>, tab: &TabState, x: f64, y: f64) {
+    if let Some(index) = app.notebook.page_num(&tab.web_view) {
+        app.notebook.set_current_page(Some(index));
+    }
+
+    let menu_box = GtkBox::new(Orientation::Vertical, 4);
+    menu_box.set_margin_top(8);
+    menu_box.set_margin_bottom(8);
+    menu_box.set_margin_start(8);
+    menu_box.set_margin_end(8);
+
+    let duplicate_button = Button::with_label("Duplicate Tab");
+    let close_button = Button::with_label("Close Tab");
+    let close_others_button = Button::with_label("Close Other Tabs");
+    let close_right_button = Button::with_label("Close Tabs to Right");
+    for button in [&duplicate_button, &close_button, &close_others_button, &close_right_button] {
+        button.set_has_frame(false);
+        button.set_halign(Align::Fill);
+        menu_box.append(button);
+    }
+
+    let mute_button = if tab.web_view.is_playing_audio() {
+        let button = Button::with_label(if tab.web_view.is_muted() {
+            "Unmute Tab"
+        } else {
+            "Mute Tab"
+        });
+        button.set_has_frame(false);
+        button.set_halign(Align::Fill);
+        menu_box.append(&button);
+        Some(button)
+    } else {
+        None
+    };
+
+    let popover = Popover::new();
+    popover.set_has_arrow(true);
+    popover.set_autohide(true);
+    popover.set_position(PositionType::Bottom);
+    popover.set_child(Some(&menu_box));
+    popover.set_parent(&tab.tab_box);
+    popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    popover.connect_closed(|popover| popover.unparent());
+
+    let pop_duplicate = popover.clone();
+    let app_duplicate = app.clone();
+    let tab_duplicate = tab.clone();
+    duplicate_button.connect_clicked(move |_| {
+        pop_duplicate.popdown();
+        duplicate_tab(&app_duplicate, &tab_duplicate);
+    });
+
+    let pop_close = popover.clone();
+    let app_close = app.clone();
+    let tab_close = tab.clone();
+    close_button.connect_clicked(move |_| {
+        pop_close.popdown();
+        close_tab(&app_close, &tab_close);
+    });
+
+    let pop_close_others = popover.clone();
+    let app_close_others = app.clone();
+    let tab_close_others = tab.clone();
+    close_others_button.connect_clicked(move |_| {
+        pop_close_others.popdown();
+        close_other_tabs(&app_close_others, &tab_close_others);
+    });
+
+    let pop_close_right = popover.clone();
+    let app_close_right = app.clone();
+    let tab_close_right = tab.clone();
+    close_right_button.connect_clicked(move |_| {
+        pop_close_right.popdown();
+        close_tabs_to_right(&app_close_right, &tab_close_right);
+    });
+
+    if let Some(mute_button) = mute_button {
+        let pop_mute = popover.clone();
+        let tab_mute = tab.clone();
+        mute_button.connect_clicked(move |_| {
+            pop_mute.popdown();
+            tab_mute.web_view.set_is_muted(!tab_mute.web_view.is_muted());
+            update_tab_audio(&tab_mute);
+        });
+    }
+
+    popover.popup();
+}
+
 fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
     if let Some(tab) = current_tab(app) {
         tab.web_view.load_uri(uri);
@@ -436,6 +594,11 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let favicon = Image::from_icon_name("globe-symbolic");
     favicon.set_pixel_size(14);
     favicon.set_valign(Align::Center);
+    let audio_icon = Image::from_icon_name("audio-volume-high-symbolic");
+    audio_icon.add_css_class("ubar-tab-audio");
+    audio_icon.set_pixel_size(14);
+    audio_icon.set_valign(Align::Center);
+    audio_icon.set_visible(false);
     let title = Label::new(Some("New Tab"));
     title.add_css_class("ubar-tab-title");
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -462,6 +625,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab_box.set_opacity(0.0);
     tab_box.append(&favicon);
     tab_box.append(&title);
+    tab_box.append(&audio_icon);
     tab_box.append(&close_button);
 
     web_view.set_hexpand(true);
@@ -474,6 +638,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         tab_box: tab_box.clone(),
         favicon: favicon.clone(),
         title: title.clone(),
+        audio_icon: audio_icon.clone(),
         loading: Rc::new(Cell::new(false)),
     };
 
@@ -502,6 +667,15 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         }
     });
     tab_box.add_controller(select_click);
+
+    let context_click = GestureClick::new();
+    context_click.set_button(gdk::BUTTON_SECONDARY);
+    let app_context = app.clone();
+    let tab_context = tab.clone();
+    context_click.connect_pressed(move |_, _, x, y| {
+        open_tab_context_menu(&app_context, &tab_context, x, y);
+    });
+    tab_box.add_controller(context_click);
 
     let drag_source = DragSource::new();
     drag_source.set_actions(gdk::DragAction::MOVE);
@@ -569,6 +743,12 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let tab_icon = tab.clone();
     web_view.connect_favicon_notify(move |_| update_tab_favicon(&tab_icon));
 
+    let tab_audio = tab.clone();
+    web_view.connect_is_playing_audio_notify(move |_| update_tab_audio(&tab_audio));
+
+    let tab_muted = tab.clone();
+    web_view.connect_is_muted_notify(move |_| update_tab_audio(&tab_muted));
+
     let app_load = app.clone();
     let tab_load = tab.clone();
     web_view.connect_load_changed(move |view, event| {
@@ -603,6 +783,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     });
 
     update_tab_favicon(&tab);
+    update_tab_audio(&tab);
     update_tab_title(app, &tab);
     web_view.load_uri(uri);
     glib::idle_add_local_once(move || animate_tab_opacity(&tab_box, 0.0, 1.0));
@@ -681,6 +862,11 @@ pub fn run() {
                 min-width: 22px;
                 min-height: 22px;
                 padding: 0;
+            }
+
+            .ubar-tab-audio {
+                min-width: 14px;
+                min-height: 14px;
             }
             ",
         );
