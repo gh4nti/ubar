@@ -19,6 +19,8 @@ use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
 const APP_ID: &str = "dev.ghanti.ubar";
 const TAB_WIDTH: i32 = 220;
 const TAB_HEIGHT: i32 = 32;
+const TAB_TITLE_WIDTH: i32 = 132;
+const TAB_ACTIONS_WIDTH: i32 = 44;
 const TAB_ANIMATION_MS: u32 = 140;
 
 #[derive(Clone)]
@@ -138,12 +140,30 @@ fn sync_tab_bar_order(app: &Rc<AppState>) {
     }
 }
 
+fn update_active_tab_styles(notebook: &Notebook, active_index: u32) {
+    let total = notebook.n_pages();
+    for index in 0..total {
+        if let Some(page) = notebook.nth_page(Some(index))
+            && let Some(tab) = unsafe { page
+                .data::<TabState>("tab-state") }
+                .map(|ptr| unsafe { ptr.as_ref().clone() })
+        {
+            if index == active_index {
+                tab.tab_box.add_css_class("ubar-tab-active");
+            } else {
+                tab.tab_box.remove_css_class("ubar-tab-active");
+            }
+        }
+    }
+}
+
 fn select_tab(app: &Rc<AppState>, index: u32) {
     if index >= app.notebook.n_pages() {
         return;
     }
 
     app.notebook.set_current_page(Some(index));
+    update_active_tab_styles(&app.notebook, index);
     if let Some(page) = app.notebook.nth_page(Some(index))
         && let Some(tab) = unsafe { page
             .data::<TabState>("tab-state") }
@@ -602,9 +622,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let title = Label::new(Some("New Tab"));
     title.add_css_class("ubar-tab-title");
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title.set_max_width_chars(32);
+    title.set_width_request(TAB_TITLE_WIDTH);
     title.set_xalign(0.0);
-    title.set_hexpand(true);
     title.set_valign(Align::Center);
 
     let close_button = Button::from_icon_name("window-close-symbolic");
@@ -612,6 +631,13 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     close_button.set_has_frame(false);
     close_button.set_focusable(false);
     close_button.set_size_request(22, 22);
+
+    let actions_box = GtkBox::new(Orientation::Horizontal, 8);
+    actions_box.set_size_request(TAB_ACTIONS_WIDTH, -1);
+    actions_box.set_halign(Align::End);
+    actions_box.set_valign(Align::Center);
+    actions_box.append(&audio_icon);
+    actions_box.append(&close_button);
 
     let tab_box = GtkBox::new(Orientation::Horizontal, 8);
     tab_box.add_css_class("ubar-tab");
@@ -625,8 +651,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab_box.set_opacity(0.0);
     tab_box.append(&favicon);
     tab_box.append(&title);
-    tab_box.append(&audio_icon);
-    tab_box.append(&close_button);
+    tab_box.append(&actions_box);
 
     web_view.set_hexpand(true);
     web_view.set_vexpand(true);
@@ -1054,19 +1079,9 @@ pub fn run() {
                 .data::<TabState>("tab-state") }
                 .map(|ptr| unsafe { ptr.as_ref().clone() })
             {
-                let total = notebook.n_pages();
-                for index in 0..total {
-                    if let Some(page) = notebook.nth_page(Some(index))
-                        && let Some(other_tab) = unsafe { page
-                            .data::<TabState>("tab-state") }
-                            .map(|ptr| unsafe { ptr.as_ref().clone() })
-                    {
-                        other_tab.tab_box.remove_css_class("ubar-tab-active");
-                        if index == page_num {
-                            other_tab.tab_box.add_css_class("ubar-tab-active");
-                        }
-                    }
-                }
+        let total = notebook.n_pages();
+                let _ = total;
+                update_active_tab_styles(notebook, page_num);
                 sync_window(&app_switch, &tab);
                 scroll_tab_into_view(&app_switch, &tab.tab_box);
             }
@@ -1184,8 +1199,7 @@ pub fn run() {
 
         let first = create_tab(&app, &app.new_tab_uri);
         if let Some(index) = app.notebook.page_num(&first.web_view) {
-            app.notebook.set_current_page(Some(index));
-            sync_window(&app, &first);
+            select_tab(&app, index);
         }
 
         unsafe {
