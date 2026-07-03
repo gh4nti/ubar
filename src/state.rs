@@ -74,6 +74,15 @@ impl BrowserState {
             return;
         }
 
+        if let Some(entry) = self.history.first_mut()
+            && entry.uri == uri
+        {
+            entry.title = if title.is_empty() { uri.into() } else { title.into() };
+            entry.timestamp = timestamp;
+            self.save();
+            return;
+        }
+
         self.history.insert(
             0,
             HistoryEntry {

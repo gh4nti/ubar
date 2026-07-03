@@ -432,6 +432,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     let favicon = Image::from_icon_name("globe-symbolic");
     let title = Label::new(Some("New Tab"));
+    title.add_css_class("ubar-tab-title");
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     title.set_max_width_chars(32);
     title.set_xalign(0.0);
@@ -509,7 +510,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let drop_target = DropTarget::new(i32::static_type(), gdk::DragAction::MOVE);
     let app_drop = app.clone();
     let view_drop = web_view.clone();
-    drop_target.connect_drop(move |_, value, _, _| {
+    let tab_box_drop = tab_box.clone();
+    drop_target.connect_drop(move |_, value, x, _| {
         let Ok(source) = value.get::<i32>() else {
             return false;
         };
@@ -519,7 +521,19 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         if source < 0 {
             return false;
         }
-        move_tab(&app_drop, source as u32, target);
+
+        let width = f64::from(tab_box_drop.allocation().width().max(1));
+        let insert_after = x >= width / 2.0;
+        let mut destination = target + u32::from(insert_after);
+        let page_count = app_drop.notebook.n_pages();
+        if destination >= page_count {
+            destination = page_count.saturating_sub(1);
+        }
+        if (source as u32) < destination {
+            destination = destination.saturating_sub(1);
+        }
+
+        move_tab(&app_drop, source as u32, destination);
         true
     });
     tab_box.add_controller(drop_target);
@@ -642,6 +656,14 @@ pub fn run() {
             .ubar-tab-active {
                 background: alpha(@accent_color, 0.14);
                 box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.32);
+            }
+
+            .ubar-tab-title {
+                font-weight: 450;
+            }
+
+            .ubar-tab-active .ubar-tab-title {
+                font-weight: 700;
             }
             ",
         );
