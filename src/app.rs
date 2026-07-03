@@ -82,7 +82,10 @@ fn current_title(view: &WebView) -> String {
 }
 
 fn current_tab(app: &AppState) -> Option<TabState> {
-    let page_num = app.notebook.current_page()?;
+    let page_num = app
+        .notebook
+        .current_page()
+        .or_else(|| (app.notebook.n_pages() > 0).then_some(0))?;
     let page = app.notebook.nth_page(Some(page_num))?;
     unsafe { page.data::<TabState>("tab-state") }
         .map(|ptr| unsafe { ptr.as_ref().clone() })
@@ -567,7 +570,19 @@ fn open_tab_context_menu(app: &Rc<AppState>, tab: &TabState, x: f64, y: f64) {
 
 fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
     if let Some(tab) = current_tab(app) {
+        if let Some(index) = app.notebook.page_num(&tab.web_view) {
+            app.notebook.set_current_page(Some(index));
+            update_active_tab_styles(&app.notebook, index);
+        }
         tab.web_view.load_uri(uri);
+        return;
+    }
+
+    if app.notebook.n_pages() > 0 {
+        select_tab(app, 0);
+        if let Some(tab) = current_tab(app) {
+            tab.web_view.load_uri(uri);
+        }
     }
 }
 
@@ -622,6 +637,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let title = Label::new(Some("New Tab"));
     title.add_css_class("ubar-tab-title");
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title.set_width_chars(16);
+    title.set_max_width_chars(16);
     title.set_width_request(TAB_TITLE_WIDTH);
     title.set_xalign(0.0);
     title.set_valign(Align::Center);
@@ -1206,6 +1223,13 @@ pub fn run() {
             app.window.set_data("app-state", app.clone());
         }
         app.window.present();
+
+        let app_start = app.clone();
+        glib::idle_add_local_once(move || {
+            if app_start.notebook.n_pages() > 0 {
+                select_tab(&app_start, 0);
+            }
+        });
     });
     application.run();
 }
