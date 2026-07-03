@@ -6,6 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, DragSource, DropTarget, Entry,
+    Align,
     EventControllerKey, EventControllerScroll, EventControllerScrollFlags, GestureClick, Image,
     HeaderBar, Label, MenuButton, Notebook, Orientation, PackType, Popover, ScrolledWindow,
     WindowControls,
@@ -17,6 +18,7 @@ use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
 
 const APP_ID: &str = "dev.ghanti.ubar";
 const TAB_WIDTH: i32 = 220;
+const TAB_HEIGHT: i32 = 38;
 const TAB_ANIMATION_MS: u32 = 140;
 
 #[derive(Clone)]
@@ -449,7 +451,9 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab_box.set_margin_bottom(4);
     tab_box.set_margin_start(6);
     tab_box.set_margin_end(6);
-    tab_box.set_size_request(TAB_WIDTH, -1);
+    tab_box.set_halign(Align::Start);
+    tab_box.set_valign(Align::Center);
+    tab_box.set_size_request(TAB_WIDTH, TAB_HEIGHT);
     tab_box.set_opacity(0.0);
     tab_box.append(&favicon);
     tab_box.append(&title);
@@ -647,8 +651,8 @@ pub fn run() {
         css.load_from_data(
             "
             .ubar-tab {
-                padding: 3px 6px;
-                border-radius: 12px;
+                padding: 2px 8px;
+                border-radius: 11px;
                 background: alpha(currentColor, 0.03);
                 box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);
                 transition: 140ms ease;
@@ -697,7 +701,7 @@ pub fn run() {
         notebook.set_show_tabs(false);
 
         let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
-        tab_bar.set_hexpand(true);
+        tab_bar.set_halign(Align::Start);
         let tab_scroller = ScrolledWindow::new();
         tab_scroller.set_hexpand(true);
         tab_scroller.set_vexpand(false);
