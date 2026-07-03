@@ -6,8 +6,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, DragSource, DropTarget, Entry,
-    EventControllerKey, GestureClick, Image, Label, MenuButton, Notebook, Orientation, Popover,
-    ScrolledWindow,
+    EventControllerKey, EventControllerScroll, EventControllerScrollFlags, GestureClick, Image,
+    Label, MenuButton, Notebook, Orientation, Popover, ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -656,6 +656,16 @@ pub fn run() {
         tab_scroller.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
         tab_scroller.set_vscrollbar_policy(gtk4::PolicyType::Never);
         tab_scroller.set_child(Some(&tab_bar));
+        let wheel_scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        let tab_scroller_ref = tab_scroller.clone();
+        wheel_scroll.connect_scroll(move |_, _, dy| {
+            let adj = tab_scroller_ref.hadjustment();
+            let step = if dy.abs() < 0.01 { 0.0 } else { dy * 56.0 };
+            let target = (adj.value() + step).clamp(adj.lower(), (adj.upper() - adj.page_size()).max(adj.lower()));
+            adj.set_value(target);
+            glib::Propagation::Stop
+        });
+        tab_scroller.add_controller(wheel_scroll);
 
         let tabs_row = GtkBox::new(Orientation::Horizontal, 6);
         tabs_row.set_margin_start(6);
