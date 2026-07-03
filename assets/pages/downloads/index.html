@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Downloads</title>
+  <link rel="stylesheet" href="../shared/page.css">
+  <style>
+    .download-card { display: grid; gap: 8px; }
+    .download-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .download-head strong { word-break: break-all; }
+    .download-meta { color: #667085; font-size: 13px; word-break: break-all; }
+    .download-actions { display: flex; gap: 8px; }
+    .progress { height: 6px; border-radius: 999px; background: #eef2f6; overflow: hidden; }
+    .progress > div { height: 100%; background: #101828; transition: width 200ms linear; }
+    .status-done { color: #027a48; font-weight: 600; }
+    .status-failed, .status-cancelled { color: #b42318; font-weight: 600; }
+    .status-active { color: #175cd3; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <div class="eyebrow">Library</div>
+        <h1>Downloads</h1>
+      </div>
+      <div class="download-actions">
+        <button class="ghost" id="open-folder">Open downloads folder</button>
+        <button class="ghost" id="clear-all">Clear list</button>
+      </div>
+    </header>
+    <section id="list" class="list"></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

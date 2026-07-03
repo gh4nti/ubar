@@ -1,4 +1,7 @@
-use crate::state::{asset_uri, BrowserState};
+use crate::passwords::Vault;
+use crate::state::{asset_uri, BrowserState, SettingsData};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use chrono::Utc;
 use gtk4::gdk;
 use gtk4::gio;
@@ -15,9 +18,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use webkit6::prelude::*;
 use webkit6::{
-    CookiePersistentStorage, FindOptions, LoadEvent, NetworkSession, Settings,
-    UserContentInjectedFrames, UserContentManager, UserScript, UserScriptInjectionTime,
-    UserStyleLevel, UserStyleSheet, WebView,
+    CacheModel, CookieAcceptPolicy, CookiePersistentStorage, Download, FindOptions,
+    GeolocationPermissionRequest, LoadEvent, MemoryPressureSettings, NetworkSession,
+    NotificationPermissionRequest, PermissionRequest, Settings, UserContentInjectedFrames,
+    UserContentManager, UserMediaPermissionRequest, UserScript, UserScriptInjectionTime,
+    UserStyleLevel, UserStyleSheet, WebContext, WebView,
 };
 
 const APP_ID: &str = "dev.ghanti.ubar";
@@ -55,22 +60,53 @@ struct AppState {
     extensions: RefCell<crate::extensions::Extensions>,
     closed_tabs: RefCell<Vec<String>>,
     browser_state: RefCell<BrowserState>,
+    vault: RefCell<Vault>,
+    active_downloads: RefCell<Vec<(u64, Download)>>,
     new_tab_uri: String,
     history_uri: String,
     bookmarks_uri: String,
     settings_uri: String,
     extensions_uri: String,
+    downloads_uri: String,
 }
 
+fn is_internal_uri(app: &AppState, uri: &str) -> bool {
+    uri == app.new_tab_uri
+        || uri == app.history_uri
+        || uri == app.bookmarks_uri
+        || uri == app.settings_uri
+        || uri == app.extensions_uri
+        || uri == app.downloads_uri
+}
+
+// scheme://host[:port] of a URI, for permission and credential keys.
+fn origin_of(uri: &str) -> String {
+    let Some(scheme_end) = uri.find("://") else {
+        return String::new();
+    };
+    let rest = &uri[scheme_end + 3..];
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    format!("{}{}", &uri[..scheme_end + 3], &rest[..host_end])
+}
+
+#[cfg(target_os = "macos")]
+const FIREFOX_UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0";
+#[cfg(target_os = "macos")]
+const CHROME_UA: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+#[cfg(not(target_os = "macos"))]
 const FIREFOX_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+#[cfg(not(target_os = "macos"))]
 const CHROME_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 // Stores sniff the UA to decide which install button to show.
 fn apply_site_user_agent(view: &WebView) {
     let uri = current_uri(view);
-    let Some(settings) = view.settings() else {
+    // WidgetExt::settings vs WebViewExt::settings are both in scope (E0034).
+    let Some(settings) = webkit6::prelude::WebViewExt::settings(view) else {
         return;
     };
     if uri.contains("addons.mozilla.org") {
@@ -83,7 +119,79 @@ fn apply_site_user_agent(view: &WebView) {
     }
 }
 
-fn normalize_uri(input: &str) -> Option<String> {
+fn search_uri(engine: &str, query: &str) -> String {
+    let query = glib::Uri::escape_string(query, None, false);
+    match engine {
+        "google" => format!("https://www.google.com/search?q={query}"),
+        "bing" => format!("https://www.bing.com/search?q={query}"),
+        "yandex" => format!("https://yandex.com/search/?text={query}"),
+        _ => format!("https://duckduckgo.com/?q={query}"),
+    }
+}
+
+// Total physical RAM in MB, cross-platform. 0 if it can't be determined.
+fn total_ram_mb() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                        return kb / 1024;
+                    }
+                }
+            }
+        }
+        0
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .map(|bytes| bytes / (1024 * 1024))
+            .unwrap_or(0)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
+// Tune WebKit memory use to the host. Must run before any web process spawns.
+// Beefy systems keep WebKit's own defaults — no artificial cap.
+fn tune_memory_for_host() {
+    let ram = total_ram_mb();
+    if ram == 0 || ram > 2048 {
+        return;
+    }
+
+    let (limit, cache) = if ram <= 768 {
+        (256, CacheModel::DocumentViewer)
+    } else if ram <= 1536 {
+        (512, CacheModel::DocumentBrowser)
+    } else {
+        (896, CacheModel::DocumentBrowser)
+    };
+
+    if let Some(context) = WebContext::default() {
+        context.set_cache_model(cache);
+    }
+
+    // Per-web-process cap; thresholds are fractions of `limit` (MB).
+    let mut settings = MemoryPressureSettings::new();
+    settings.set_memory_limit(limit);
+    settings.set_conservative_threshold(0.33);
+    settings.set_strict_threshold(0.5);
+    settings.set_kill_threshold(0.85);
+    settings.set_poll_interval(30.0);
+    NetworkSession::set_memory_pressure_settings(&mut settings);
+}
+
+fn normalize_uri(input: &str, engine: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
@@ -95,8 +203,7 @@ fn normalize_uri(input: &str) -> Option<String> {
 
     // Looks like a search query, not a host -> web search.
     if trimmed.contains(' ') || (!trimmed.contains('.') && !trimmed.contains(':')) {
-        let query = glib::Uri::escape_string(trimmed, None, false);
-        return Some(format!("https://duckduckgo.com/?q={query}"));
+        return Some(search_uri(engine, trimmed));
     }
 
     Some(format!("https://{trimmed}"))
@@ -175,7 +282,8 @@ fn tab_grab_focus(app: &AppState) {
 fn zoom_current_tab(app: &AppState, delta: f64) {
     if let Some(tab) = current_tab(app) {
         if delta == 0.0 {
-            tab.web_view.set_zoom_level(1.0);
+            tab.web_view
+                .set_zoom_level(app.browser_state.borrow().settings.default_zoom);
         } else {
             let level = (tab.web_view.zoom_level() + delta).clamp(0.3, 5.0);
             tab.web_view.set_zoom_level(level);
@@ -292,7 +400,7 @@ fn move_tab(app: &Rc<AppState>, source: u32, target: u32) {
 fn update_bookmark_button(app: &AppState) {
     if let Some(tab) = current_tab(app) {
         let uri = current_uri(&tab.web_view);
-        if uri.is_empty() || uri == app.new_tab_uri || uri == app.history_uri || uri == app.bookmarks_uri || uri == app.settings_uri || uri == app.extensions_uri {
+        if uri.is_empty() || is_internal_uri(app, &uri) {
             app.bookmark_button.set_sensitive(false);
             app.bookmark_button.set_icon_name("bookmark-new-symbolic");
             return;
@@ -329,18 +437,56 @@ fn sync_window(app: &AppState, tab: &TabState) {
     update_bookmark_button(app);
 }
 
-fn configure_web_view(web_view: &WebView) {
+fn configure_web_view(web_view: &WebView, prefs: &SettingsData) {
     let settings = Settings::new();
     settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     settings.set_enable_webgl(true);
     settings.set_enable_write_console_messages_to_stdout(true);
     settings.set_enable_developer_extras(true);
+    // Let WebKit drop decoded resources and page caches under memory pressure.
+    settings.set_enable_page_cache(true);
+    settings.set_default_font_size(prefs.font_size);
     web_view.set_settings(&settings);
+    web_view.set_zoom_level(prefs.default_zoom);
 
     if let Some(session) = web_view.network_session() {
         if let Some(data_manager) = session.website_data_manager() {
             data_manager.set_favicons_enabled(true);
         }
+    }
+}
+
+fn apply_theme(theme: &str) {
+    if let Some(settings) = gtk4::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(theme == "dark");
+    }
+}
+
+// Re-apply zoom/font settings to every open tab after a settings change.
+fn apply_appearance(app: &Rc<AppState>) {
+    let prefs = app.browser_state.borrow().settings.clone();
+    apply_theme(&prefs.theme);
+    for index in 0..app.notebook.n_pages() {
+        if let Some(page) = app.notebook.nth_page(Some(index))
+            && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
+                .map(|ptr| unsafe { ptr.as_ref().clone() })
+        {
+            tab.web_view.set_zoom_level(prefs.default_zoom);
+            if let Some(settings) = webkit6::prelude::WebViewExt::settings(&tab.web_view) {
+                settings.set_default_font_size(prefs.font_size);
+            }
+        }
+    }
+}
+
+fn apply_cookie_policy(app: &AppState) {
+    if let Some(cookies) = app.network_session.cookie_manager() {
+        let rule = app.browser_state.borrow().permission_for("", "cookies");
+        cookies.set_accept_policy(match rule.as_str() {
+            "allow" => CookieAcceptPolicy::Always,
+            "block" => CookieAcceptPolicy::Never,
+            _ => CookieAcceptPolicy::NoThirdParty,
+        });
     }
 }
 
@@ -357,6 +503,8 @@ fn update_tab_title(app: &AppState, tab: &TabState) {
         "Settings".to_string()
     } else if uri == app.extensions_uri {
         "Extensions".to_string()
+    } else if uri == app.downloads_uri {
+        "Downloads".to_string()
     } else if !title.is_empty() {
         title
     } else if !uri.is_empty() {
@@ -430,13 +578,72 @@ fn build_bookmarks_script(state: &BrowserState) -> String {
     format!("window.ubarRenderBookmarks({{items:[{items}]}});")
 }
 
-fn build_settings_script(state: &BrowserState) -> String {
+fn build_settings_script(state: &BrowserState, vault: &Vault) -> String {
+    let defaults = state
+        .permission_defaults
+        .iter()
+        .map(|(key, value)| format!("'{}':'{}'", js_escape(key), js_escape(value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sites = state
+        .site_permissions
+        .iter()
+        .map(|(origin, rules)| {
+            let mut fields = vec![format!("origin:'{}'", js_escape(origin))];
+            fields.extend(
+                rules
+                    .iter()
+                    .map(|(key, value)| format!("'{}':'{}'", js_escape(key), js_escape(value))),
+            );
+            format!("{{{}}}", fields.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let passwords = vault
+        .entries()
+        .iter()
+        .map(|entry| {
+            format!(
+                "{{origin:'{}',username:'{}'}}",
+                js_escape(&entry.origin),
+                js_escape(&entry.username)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "window.ubarRenderSettings({{homepageUri:'{}',historyCount:{},bookmarkCount:{}}});",
+        "window.ubarRenderSettings({{homepageUri:'{}',historyCount:{},bookmarkCount:{},searchEngine:'{}',downloadDir:'{}',theme:'{}',defaultZoom:{},fontSize:{},defaults:{{{defaults}}},sites:[{sites}],passwords:[{passwords}]}});",
         js_escape(&state.settings.homepage_uri),
         state.history.len(),
-        state.bookmarks.len()
+        state.bookmarks.len(),
+        js_escape(&state.settings.search_engine),
+        js_escape(&state.settings.download_dir),
+        js_escape(&state.settings.theme),
+        state.settings.default_zoom,
+        state.settings.font_size,
     )
+}
+
+fn build_downloads_script(state: &BrowserState) -> String {
+    let items = state
+        .downloads
+        .iter()
+        .map(|entry| {
+            format!(
+                "{{id:{},filename:'{}',uri:'{}',destination:'{}',received:{},total:{},status:'{}',time:'{}'}}",
+                entry.id,
+                js_escape(&entry.filename),
+                js_escape(&entry.uri),
+                js_escape(&entry.destination),
+                entry.received,
+                entry.total,
+                js_escape(&entry.status),
+                entry.timestamp,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("window.ubarRenderDownloads({{items:[{items}]}});")
 }
 
 fn build_extensions_script(app: &AppState) -> String {
@@ -465,9 +672,15 @@ fn render_internal_page(app: &Rc<AppState>, tab: &TabState) {
     } else if uri == app.bookmarks_uri {
         evaluate_js(&tab.web_view, &build_bookmarks_script(&state), &app.bookmarks_uri);
     } else if uri == app.settings_uri {
-        evaluate_js(&tab.web_view, &build_settings_script(&state), &app.settings_uri);
+        evaluate_js(
+            &tab.web_view,
+            &build_settings_script(&state, &app.vault.borrow()),
+            &app.settings_uri,
+        );
     } else if uri == app.extensions_uri {
         evaluate_js(&tab.web_view, &build_extensions_script(app), &app.extensions_uri);
+    } else if uri == app.downloads_uri {
+        evaluate_js(&tab.web_view, &build_downloads_script(&state), &app.downloads_uri);
     }
 }
 
@@ -501,11 +714,7 @@ fn refresh_internal_pages(app: &Rc<AppState>) {
                 .map(|ptr| unsafe { ptr.as_ref().clone() })
         {
             let uri = current_uri(&tab.web_view);
-            if uri == app.history_uri
-                || uri == app.bookmarks_uri
-                || uri == app.settings_uri
-                || uri == app.extensions_uri
-            {
+            if !uri.is_empty() && uri != app.new_tab_uri && is_internal_uri(app, &uri) {
                 render_internal_page(app, &tab);
             }
         }
@@ -760,11 +969,327 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
 
     if let Some(uri) = message.strip_prefix("save-homepage:") {
         let decoded = glib::uri_unescape_string(uri, None::<&str>).unwrap_or_default();
+        let engine = app.browser_state.borrow().settings.search_engine.clone();
         app.browser_state.borrow_mut().settings.homepage_uri =
-            normalize_uri(&decoded).unwrap_or_default();
+            normalize_uri(&decoded, &engine).unwrap_or_default();
         app.browser_state.borrow().save();
         refresh_internal_pages(app);
+        return;
     }
+
+    if let Some(engine) = message.strip_prefix("save-search-engine:") {
+        app.browser_state.borrow_mut().settings.search_engine = engine.to_string();
+        app.browser_state.borrow().save();
+        return;
+    }
+
+    if let Some(dir) = message.strip_prefix("save-download-dir:") {
+        let decoded = glib::uri_unescape_string(dir, None::<&str>).unwrap_or_default();
+        app.browser_state.borrow_mut().settings.download_dir = decoded.to_string();
+        app.browser_state.borrow().save();
+        refresh_internal_pages(app);
+        return;
+    }
+
+    if let Some(theme) = message.strip_prefix("save-theme:") {
+        app.browser_state.borrow_mut().settings.theme = theme.to_string();
+        app.browser_state.borrow().save();
+        apply_appearance(app);
+        return;
+    }
+
+    if let Some(zoom) = message.strip_prefix("save-zoom:") {
+        if let Ok(value) = zoom.parse::<f64>() {
+            app.browser_state.borrow_mut().settings.default_zoom = value.clamp(0.3, 5.0);
+            app.browser_state.borrow().save();
+            apply_appearance(app);
+        }
+        return;
+    }
+
+    if let Some(size) = message.strip_prefix("save-font-size:") {
+        if let Ok(value) = size.parse::<u32>() {
+            app.browser_state.borrow_mut().settings.font_size = value.clamp(6, 72);
+            app.browser_state.borrow().save();
+            apply_appearance(app);
+        }
+        return;
+    }
+
+    if let Some(rest) = message.strip_prefix("save-permission-default:") {
+        if let Some((key, value)) = rest.split_once(':') {
+            app.browser_state
+                .borrow_mut()
+                .permission_defaults
+                .insert(key.to_string(), value.to_string());
+            app.browser_state.borrow().save();
+            apply_cookie_policy(app);
+            refresh_internal_pages(app);
+        }
+        return;
+    }
+
+    if let Some(rest) = message.strip_prefix("save-site-permission:") {
+        let mut parts = rest.splitn(3, ':');
+        if let (Some(origin), Some(key), Some(value)) = (parts.next(), parts.next(), parts.next()) {
+            let origin = glib::uri_unescape_string(origin, None::<&str>).unwrap_or_default();
+            app.browser_state
+                .borrow_mut()
+                .set_site_permission(&origin, key, value);
+            refresh_internal_pages(app);
+        }
+        return;
+    }
+
+    if let Some(origin) = message.strip_prefix("remove-site:") {
+        let decoded = glib::uri_unescape_string(origin, None::<&str>).unwrap_or_default();
+        app.browser_state
+            .borrow_mut()
+            .site_permissions
+            .remove(decoded.as_str());
+        app.browser_state.borrow().save();
+        refresh_internal_pages(app);
+        return;
+    }
+
+    if let Some(origin) = message.strip_prefix("delete-credential:") {
+        let decoded = glib::uri_unescape_string(origin, None::<&str>).unwrap_or_default();
+        if app.vault.borrow_mut().remove(&decoded) {
+            refresh_internal_pages(app);
+        }
+        return;
+    }
+
+    if let Some(rest) = message.strip_prefix("cred:") {
+        handle_credential_capture(app, rest);
+        return;
+    }
+
+    if let Some(id) = message.strip_prefix("download-open:") {
+        if let Ok(id) = id.parse::<u64>() {
+            let destination = app
+                .browser_state
+                .borrow()
+                .downloads
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.destination.clone());
+            if let Some(destination) = destination {
+                let _ = gio::AppInfo::launch_default_for_uri(
+                    &format!("file://{destination}"),
+                    None::<&gio::AppLaunchContext>,
+                );
+            }
+        }
+        return;
+    }
+
+    if let Some(id) = message.strip_prefix("download-cancel:") {
+        if let Ok(id) = id.parse::<u64>() {
+            let download = app
+                .active_downloads
+                .borrow()
+                .iter()
+                .find(|(entry_id, _)| *entry_id == id)
+                .map(|(_, download)| download.clone());
+            if let Some(download) = download {
+                download.cancel();
+            }
+        }
+        return;
+    }
+
+    if message == "downloads-clear" {
+        let mut state = app.browser_state.borrow_mut();
+        state.downloads.retain(|entry| entry.status == "active");
+        state.save();
+        drop(state);
+        refresh_internal_pages(app);
+        return;
+    }
+
+    if message == "downloads-folder" {
+        let dir = download_directory(app);
+        let _ = gio::AppInfo::launch_default_for_uri(
+            &format!("file://{}", dir.to_string_lossy()),
+            None::<&gio::AppLaunchContext>,
+        );
+    }
+}
+
+fn download_directory(app: &AppState) -> std::path::PathBuf {
+    let configured = app.browser_state.borrow().settings.download_dir.clone();
+    if !configured.is_empty() {
+        let path = std::path::PathBuf::from(&configured);
+        if std::fs::create_dir_all(&path).is_ok() {
+            return path;
+        }
+    }
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn refresh_downloads_pages(app: &Rc<AppState>) {
+    let script = build_downloads_script(&app.browser_state.borrow());
+    for index in 0..app.notebook.n_pages() {
+        if let Some(page) = app.notebook.nth_page(Some(index))
+            && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
+                .map(|ptr| unsafe { ptr.as_ref().clone() })
+            && current_uri(&tab.web_view) == app.downloads_uri
+        {
+            evaluate_js(&tab.web_view, &script, &app.downloads_uri);
+        }
+    }
+}
+
+// Fill the first login form when a credential is stored for this origin.
+fn autofill_credentials(app: &Rc<AppState>, view: &WebView) {
+    let origin = origin_of(&current_uri(view));
+    if origin.is_empty() {
+        return;
+    }
+    let Some((username, password)) = app.vault.borrow().get(&origin) else {
+        return;
+    };
+    let script = format!(
+        r#"(function(){{
+var d=function(v){{return decodeURIComponent(escape(atob(v)))}};
+var u=d('{}'),p=d('{}');
+var pw=document.querySelector('input[type=password]');
+if(!pw)return;
+var form=pw.form;
+if(form&&u){{var user=form.querySelector('input[type=email],input[type=text]');if(user&&!user.value)user.value=u;}}
+if(!pw.value)pw.value=p;
+}})();"#,
+        B64.encode(username.as_bytes()),
+        B64.encode(password.as_bytes()),
+    );
+    evaluate_js(view, &script, "ubar://autofill");
+}
+
+// cred:<b64 origin>:<b64 user>:<b64 pass> from the capture user script.
+fn handle_credential_capture(app: &Rc<AppState>, payload: &str) {
+    let mut parts = payload.splitn(3, ':');
+    let (Some(origin), Some(user), Some(pass)) = (parts.next(), parts.next(), parts.next()) else {
+        return;
+    };
+    let decode = |value: &str| {
+        B64.decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    let (Some(origin), Some(username), Some(password)) = (decode(origin), decode(user), decode(pass))
+    else {
+        return;
+    };
+    if origin.is_empty() || password.is_empty() || app.vault.borrow().is_never(&origin) {
+        return;
+    }
+    if app.vault.borrow().get(&origin).map(|(u, p)| (u, p)) == Some((username.clone(), password.clone())) {
+        return;
+    }
+
+    let menu_box = GtkBox::new(Orientation::Vertical, 8);
+    menu_box.set_margin_top(10);
+    menu_box.set_margin_bottom(10);
+    menu_box.set_margin_start(10);
+    menu_box.set_margin_end(10);
+    let label = Label::new(Some(&format!("Save password for {origin}?")));
+    let save_button = Button::with_label("Save");
+    let never_button = Button::with_label("Never for this site");
+    menu_box.append(&label);
+    menu_box.append(&save_button);
+    menu_box.append(&never_button);
+
+    let popover = Popover::new();
+    popover.set_child(Some(&menu_box));
+    popover.set_parent(&app.address_entry);
+    popover.set_position(PositionType::Bottom);
+    popover.connect_closed(|popover| popover.unparent());
+
+    let app_save = app.clone();
+    let pop_save = popover.clone();
+    let origin_save = origin.clone();
+    save_button.connect_clicked(move |_| {
+        app_save
+            .vault
+            .borrow_mut()
+            .save(&origin_save, &username, &password);
+        refresh_internal_pages(&app_save);
+        pop_save.popdown();
+    });
+
+    let app_never = app.clone();
+    let pop_never = popover.clone();
+    never_button.connect_clicked(move |_| {
+        app_never.vault.borrow_mut().set_never(&origin);
+        pop_never.popdown();
+    });
+
+    popover.popup();
+}
+
+// Ask the user, remember the answer as a site rule.
+fn prompt_permission(app: &Rc<AppState>, origin: String, key: &'static str, request: PermissionRequest) {
+    let menu_box = GtkBox::new(Orientation::Vertical, 8);
+    menu_box.set_margin_top(10);
+    menu_box.set_margin_bottom(10);
+    menu_box.set_margin_start(10);
+    menu_box.set_margin_end(10);
+    let label = Label::new(Some(&format!("{origin} wants to use: {key}")));
+    let allow_button = Button::with_label("Allow");
+    let block_button = Button::with_label("Block");
+    menu_box.append(&label);
+    menu_box.append(&allow_button);
+    menu_box.append(&block_button);
+
+    let popover = Popover::new();
+    popover.set_child(Some(&menu_box));
+    popover.set_parent(&app.address_entry);
+    popover.set_position(PositionType::Bottom);
+
+    let decided = Rc::new(Cell::new(false));
+
+    let app_allow = app.clone();
+    let pop_allow = popover.clone();
+    let request_allow = request.clone();
+    let origin_allow = origin.clone();
+    let decided_allow = decided.clone();
+    allow_button.connect_clicked(move |_| {
+        decided_allow.set(true);
+        request_allow.allow();
+        app_allow
+            .browser_state
+            .borrow_mut()
+            .set_site_permission(&origin_allow, key, "allow");
+        refresh_internal_pages(&app_allow);
+        pop_allow.popdown();
+    });
+
+    let app_block = app.clone();
+    let pop_block = popover.clone();
+    let request_block = request.clone();
+    let decided_block = decided.clone();
+    block_button.connect_clicked(move |_| {
+        decided_block.set(true);
+        request_block.deny();
+        app_block
+            .browser_state
+            .borrow_mut()
+            .set_site_permission(&origin, key, "block");
+        refresh_internal_pages(&app_block);
+        pop_block.popdown();
+    });
+
+    popover.connect_closed(move |popover| {
+        if !decided.get() {
+            request.deny();
+        }
+        popover.unparent();
+    });
+
+    popover.popup();
 }
 
 // Injected on the store sites: floating "Install in ubar" button that navigates
@@ -849,17 +1374,35 @@ fn inject_extensions(app: &AppState, manager: &UserContentManager) {
     }
 }
 
+// Posts submitted login forms to the vault as cred:<b64 origin>:<b64 user>:<b64 pass>.
+const CRED_CAPTURE: &str = r#"document.addEventListener('submit',function(e){
+try{
+var f=e.target;if(!f||!f.querySelector)return;
+var pw=f.querySelector('input[type=password]');if(!pw||!pw.value)return;
+var user=f.querySelector('input[type=email],input[type=text]');
+var enc=function(v){return btoa(unescape(encodeURIComponent(v)))};
+window.webkit.messageHandlers.ubar.postMessage('cred:'+enc(location.origin)+':'+enc(user?user.value:'')+':'+enc(pw.value));
+}catch(err){}
+},true);"#;
+
 fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let manager = UserContentManager::new();
     let _ = manager.register_script_message_handler("ubar", None::<&str>);
     inject_extensions(app, &manager);
     inject_store_helpers(&manager);
+    manager.add_script(&UserScript::new(
+        CRED_CAPTURE,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::End,
+        &["https://*/*", "http://*/*"],
+        &[],
+    ));
 
     let web_view: WebView = glib::Object::builder()
         .property("user-content-manager", &manager)
         .property("network-session", &app.network_session)
         .build();
-    configure_web_view(&web_view);
+    configure_web_view(&web_view, &app.browser_state.borrow().settings);
 
     let favicon = Image::from_icon_name("globe-symbolic");
     favicon.set_pixel_size(14);
@@ -1022,6 +1565,45 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     web_view.connect_uri_notify(|view| apply_site_user_agent(view));
 
+    // Camera / microphone / location / notification prompts, honoring stored rules.
+    let app_perm = app.clone();
+    web_view.connect_permission_request(move |view, request| {
+        let origin = origin_of(&current_uri(view));
+        let key = if request.is::<NotificationPermissionRequest>() {
+            "notifications"
+        } else if request.is::<GeolocationPermissionRequest>() {
+            "location"
+        } else if let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() {
+            if media.is_for_video_device() {
+                "camera"
+            } else {
+                "microphone"
+            }
+        } else {
+            request.deny();
+            return true;
+        };
+
+        match app_perm.browser_state.borrow().permission_for(&origin, key).as_str() {
+            "allow" => request.allow(),
+            "block" => request.deny(),
+            _ => prompt_permission(&app_perm, origin, key, request.clone()),
+        }
+        true
+    });
+
+    // Per-site JavaScript rule, applied before the page runs scripts.
+    let app_js = app.clone();
+    web_view.connect_uri_notify(move |view| {
+        let origin = origin_of(&current_uri(view));
+        if origin.starts_with("http") {
+            let rule = app_js.browser_state.borrow().permission_for(&origin, "javascript");
+            if let Some(settings) = webkit6::prelude::WebViewExt::settings(view) {
+                settings.set_enable_javascript(rule != "block");
+            }
+        }
+    });
+
     // Non-displayable responses (xpi, crx, binaries) become downloads.
     web_view.connect_decide_policy(|_, decision, decision_type| {
         if decision_type == webkit6::PolicyDecisionType::Response
@@ -1034,9 +1616,15 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         false
     });
 
-    // window.open / target=_blank -> new tab.
+    // window.open / target=_blank -> new tab, unless pop-ups are blocked for the site.
     let app_create = app.clone();
-    web_view.connect_create(move |_, action| {
+    web_view.connect_create(move |view, action| {
+        let origin = origin_of(&current_uri(view));
+        if app_create.browser_state.borrow().permission_for(&origin, "popups") == "block"
+            && !action.is_user_gesture()
+        {
+            return None;
+        }
         if let Some(uri) = action.request().and_then(|request| request.uri()) {
             let tab = create_tab(&app_create, &uri);
             if let Some(index) = app_create.notebook.page_num(&tab.web_view) {
@@ -1062,7 +1650,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         if event == LoadEvent::Finished {
             let uri = current_uri(view);
             let title = current_title(view);
-            if uri == app_load.history_uri || uri == app_load.bookmarks_uri || uri == app_load.settings_uri || uri == app_load.extensions_uri {
+            if uri != app_load.new_tab_uri && is_internal_uri(&app_load, &uri) {
                 render_internal_page(&app_load, &tab_load);
             } else if !uri.is_empty() && uri != app_load.new_tab_uri {
                 app_load.browser_state.borrow_mut().add_history(
@@ -1071,6 +1659,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
                     Utc::now().timestamp(),
                 );
                 refresh_internal_pages(&app_load);
+                autofill_credentials(&app_load, view);
             }
         }
         if let Some(current) = current_tab(&app_load) && current.web_view == tab_load.web_view {
@@ -1094,6 +1683,156 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     tab
 }
 
+// Strips the page down to its main article with reading controls.
+// Running it again reloads the page (toggle off).
+const READER_JS: &str = r#"(function(){
+if(document.getElementById('ubar-reader-style')){location.reload();return;}
+var art=document.querySelector('article');
+if(!art){var best=null,score=0;
+document.querySelectorAll('main,section,div').forEach(function(el){
+var s=0,ps=el.querySelectorAll('p');
+for(var i=0;i<ps.length;i++)s+=ps[i].innerText.length;
+if(s>score){score=s;best=el;}});
+art=best||document.body;}
+var title=document.title,content=art.innerHTML;
+document.body.innerHTML=
+'<div id="ubar-reader">'+
+'<div class="ubar-reader-bar">'+
+'<button data-act="smaller">A-</button><button data-act="larger">A+</button>'+
+'<button data-theme="light">Light</button><button data-theme="sepia">Sepia</button><button data-theme="dark">Dark</button>'+
+'<button data-act="close">Exit reader</button>'+
+'</div><h1>'+title+'</h1><div class="ubar-reader-content">'+content+'</div></div>';
+var st=document.createElement('style');st.id='ubar-reader-style';
+st.textContent='body{margin:0;background:var(--rb,#fff);color:var(--rc,#1a1a1a);}'+
+'#ubar-reader{max-width:44em;margin:0 auto;padding:24px;font:var(--rs,19px)/1.7 Georgia,serif;}'+
+'#ubar-reader img{max-width:100%;height:auto;}'+
+'#ubar-reader .ubar-reader-content *{background:transparent!important;color:inherit!important;float:none!important;width:auto!important;max-width:100%!important;}'+
+'#ubar-reader aside,#ubar-reader nav,#ubar-reader iframe,#ubar-reader form,#ubar-reader button:not(.ubar-reader-bar button){display:none;}'+
+'.ubar-reader-bar{position:sticky;top:0;display:flex;gap:8px;padding:10px 0;background:inherit;font:14px system-ui;}'+
+'.ubar-reader-bar button{display:inline-block!important;padding:6px 12px;border-radius:999px;border:1px solid rgba(128,128,128,.4);background:transparent;color:inherit;cursor:pointer;}';
+document.head.appendChild(st);
+var size=19;
+document.querySelector('.ubar-reader-bar').addEventListener('click',function(e){
+var b=e.target.closest('button');if(!b)return;
+if(b.dataset.act==='close'){location.reload();return;}
+if(b.dataset.act==='smaller')size=Math.max(12,size-2);
+if(b.dataset.act==='larger')size=Math.min(36,size+2);
+document.documentElement.style.setProperty('--rs',size+'px');
+if(b.dataset.theme==='light'){document.documentElement.style.setProperty('--rb','#fff');document.documentElement.style.setProperty('--rc','#1a1a1a');}
+if(b.dataset.theme==='sepia'){document.documentElement.style.setProperty('--rb','#f4ecd8');document.documentElement.style.setProperty('--rc','#5b4636');}
+if(b.dataset.theme==='dark'){document.documentElement.style.setProperty('--rb','#1e1e1e');document.documentElement.style.setProperty('--rc','#d4d4d4');}
+});
+window.scrollTo(0,0);
+})();"#;
+
+fn toggle_reading_mode(app: &Rc<AppState>) {
+    if let Some(tab) = current_tab(app) {
+        let uri = current_uri(&tab.web_view);
+        if uri.starts_with("http") {
+            evaluate_js(&tab.web_view, READER_JS, "ubar://reader");
+        }
+    }
+}
+
+// Private window: ephemeral session, nothing written to disk, no history.
+fn open_incognito_window(app: &Rc<AppState>) {
+    let session = NetworkSession::new_ephemeral();
+    let web_view: WebView = glib::Object::builder()
+        .property("network-session", &session)
+        .build();
+    configure_web_view(&web_view, &app.browser_state.borrow().settings);
+
+    let entry = Entry::new();
+    entry.add_css_class("ubar-address");
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some("Incognito — nothing is saved"));
+
+    let header = HeaderBar::new();
+    header.set_title_widget(Some(&entry));
+
+    let window = gtk4::Window::builder()
+        .default_width(1000)
+        .default_height(700)
+        .title("ubar (Incognito)")
+        .build();
+    if let Some(application) = app.window.application() {
+        window.set_application(Some(&application));
+    }
+    window.set_titlebar(Some(&header));
+    web_view.set_hexpand(true);
+    web_view.set_vexpand(true);
+    window.set_child(Some(&web_view));
+
+    let engine = app.browser_state.borrow().settings.search_engine.clone();
+    let view_entry = web_view.clone();
+    entry.connect_activate(move |entry| {
+        if let Some(uri) = normalize_uri(&entry.text(), &engine) {
+            view_entry.load_uri(&uri);
+        }
+    });
+    let entry_sync = entry.clone();
+    web_view.connect_uri_notify(move |view| {
+        entry_sync.set_text(&current_uri(view));
+    });
+
+    window.present();
+    entry.grab_focus();
+}
+
+fn open_task_manager(app: &Rc<AppState>) {
+    let list = GtkBox::new(Orientation::Vertical, 6);
+    list.set_margin_top(12);
+    list.set_margin_bottom(12);
+    list.set_margin_start(12);
+    list.set_margin_end(12);
+
+    let note = Label::new(Some(
+        "Each tab runs in its own WebKit process. WebKitGTK does not expose per-process \
+         memory to the embedder; kill a tab here to reclaim its resources.",
+    ));
+    note.set_wrap(true);
+    note.set_xalign(0.0);
+    list.append(&note);
+
+    let window = gtk4::Window::builder()
+        .default_width(520)
+        .default_height(420)
+        .title("Task Manager")
+        .transient_for(&app.window)
+        .build();
+
+    for index in 0..app.notebook.n_pages() {
+        if let Some(page) = app.notebook.nth_page(Some(index))
+            && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
+                .map(|ptr| unsafe { ptr.as_ref().clone() })
+        {
+            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let title = current_title(&tab.web_view);
+            let uri = current_uri(&tab.web_view);
+            let label = Label::new(Some(if title.is_empty() { &uri } else { &title }));
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_hexpand(true);
+            label.set_xalign(0.0);
+            let kill = Button::with_label("Kill");
+            let app_kill = app.clone();
+            let tab_kill = tab.clone();
+            let window_kill = window.clone();
+            kill.connect_clicked(move |_| {
+                close_tab(&app_kill, &tab_kill);
+                window_kill.close();
+            });
+            row.append(&label);
+            row.append(&kill);
+            list.append(&row);
+        }
+    }
+
+    let scroller = ScrolledWindow::new();
+    scroller.set_child(Some(&list));
+    window.set_child(Some(&scroller));
+    window.present();
+}
+
 fn build_menu(app: &Rc<AppState>) {
     let menu_box = GtkBox::new(Orientation::Vertical, 4);
     menu_box.set_margin_top(8);
@@ -1102,15 +1841,21 @@ fn build_menu(app: &Rc<AppState>) {
     menu_box.set_margin_end(8);
 
     let home = Button::with_label("Home");
+    let incognito = Button::with_label("New Incognito Window");
     let history = Button::with_label("History");
     let bookmarks = Button::with_label("Bookmarks");
     let downloads = Button::with_label("Downloads");
+    let reader = Button::with_label("Reading Mode");
+    let task_manager = Button::with_label("Task Manager");
     let extensions = Button::with_label("Extensions");
     let settings = Button::with_label("Settings");
     menu_box.append(&home);
+    menu_box.append(&incognito);
     menu_box.append(&history);
     menu_box.append(&bookmarks);
     menu_box.append(&downloads);
+    menu_box.append(&reader);
+    menu_box.append(&task_manager);
     menu_box.append(&extensions);
     menu_box.append(&settings);
 
@@ -1134,15 +1879,19 @@ fn build_menu(app: &Rc<AppState>) {
     let app_bookmarks = app.clone();
     bookmarks.connect_clicked(move |_| load_uri_in_current_tab(&app_bookmarks, &app_bookmarks.bookmarks_uri));
 
+    let app_downloads = app.clone();
     downloads.connect_clicked(move |_| {
-        let dir = dirs::download_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let _ = gio::AppInfo::launch_default_for_uri(
-            &format!("file://{}", dir.to_string_lossy()),
-            None::<&gio::AppLaunchContext>,
-        );
+        load_uri_in_current_tab(&app_downloads, &app_downloads.downloads_uri)
     });
+
+    let app_incognito = app.clone();
+    incognito.connect_clicked(move |_| open_incognito_window(&app_incognito));
+
+    let app_reader = app.clone();
+    reader.connect_clicked(move |_| toggle_reading_mode(&app_reader));
+
+    let app_tasks = app.clone();
+    task_manager.connect_clicked(move |_| open_task_manager(&app_tasks));
 
     let app_extensions = app.clone();
     extensions.connect_clicked(move |_| {
@@ -1156,12 +1905,15 @@ fn build_menu(app: &Rc<AppState>) {
 pub fn run() {
     let application = Application::builder().application_id(APP_ID).build();
     application.connect_activate(|gtk_app| {
+        // Must precede any WebView/NetworkSession so it reaches every web process.
+        tune_memory_for_host();
+
         let css = gtk4::CssProvider::new();
         css.load_from_data(
             "
             .ubar-tab {
                 min-height: 0;
-                padding: 0 8px;
+                padding: 0 2px 0 10px;
                 border-radius: 11px;
                 background: alpha(currentColor, 0.03);
                 box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);
@@ -1380,21 +2132,41 @@ pub fn run() {
             extensions: RefCell::new(crate::extensions::load()),
             closed_tabs: RefCell::new(Vec::new()),
             browser_state: RefCell::new(BrowserState::load()),
+            vault: RefCell::new(Vault::load()),
+            active_downloads: RefCell::new(Vec::new()),
             new_tab_uri: asset_uri("assets/newtab/index.html"),
             history_uri: asset_uri("assets/pages/history/index.html"),
             bookmarks_uri: asset_uri("assets/pages/bookmarks/index.html"),
             settings_uri: asset_uri("assets/pages/settings/index.html"),
             extensions_uri: asset_uri("assets/pages/extensions/index.html"),
+            downloads_uri: asset_uri("assets/pages/downloads/index.html"),
         });
+
+        // Interrupted downloads from a previous run can never resume.
+        {
+            let mut state = app.browser_state.borrow_mut();
+            for entry in &mut state.downloads {
+                if entry.status == "active" {
+                    entry.status = "failed".into();
+                }
+            }
+            state.save();
+        }
+        apply_theme(&app.browser_state.borrow().settings.theme);
+        apply_cookie_policy(&app);
 
         build_menu(&app);
 
         // Downloads: .xpi/.crx go to a staging dir and install as extensions,
-        // everything else lands in ~/Downloads.
+        // everything else lands in the configured download dir with live tracking.
         let pending_dir = cache_root.join("pending");
         let app_download = app.clone();
         app.network_session.connect_download_started(move |_, download| {
             let pending = pending_dir.clone();
+            let entry_id = Rc::new(Cell::new(0u64));
+
+            let app_decide = app_download.clone();
+            let entry_id_decide = entry_id.clone();
             download.connect_decide_destination(move |download, suggested| {
                 let name = if suggested.is_empty() { "download" } else { suggested };
                 let lower = name.to_ascii_lowercase();
@@ -1415,9 +2187,7 @@ pub fn run() {
                     return true;
                 }
 
-                let dir = dirs::download_dir()
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let dir = download_directory(&app_decide);
                 let mut path = dir.join(name);
                 let mut counter = 1;
                 while path.exists() {
@@ -1425,11 +2195,104 @@ pub fn run() {
                     counter += 1;
                 }
                 download.set_destination(&path.to_string_lossy());
+
+                let uri = download
+                    .request()
+                    .and_then(|request| request.uri())
+                    .map(|uri| uri.to_string())
+                    .unwrap_or_default();
+                let id = app_decide.browser_state.borrow_mut().add_download(
+                    &uri,
+                    &path.to_string_lossy(),
+                    name,
+                    Utc::now().timestamp(),
+                );
+                entry_id_decide.set(id);
+                app_decide
+                    .active_downloads
+                    .borrow_mut()
+                    .push((id, download.clone()));
+                refresh_downloads_pages(&app_decide);
+
+                // Live progress: poll twice a second while the transfer runs.
+                let app_tick = app_decide.clone();
+                let download_tick = download.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                    let mut active = false;
+                    {
+                        let mut state = app_tick.browser_state.borrow_mut();
+                        if let Some(entry) = state.download_mut(id) {
+                            if entry.status == "active" {
+                                active = true;
+                                entry.received = download_tick.received_data_length();
+                                if let Some(response) = download_tick.response() {
+                                    let length = response.content_length();
+                                    if length > 0 {
+                                        entry.total = length;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    refresh_downloads_pages(&app_tick);
+                    if active {
+                        glib::ControlFlow::Continue
+                    } else {
+                        glib::ControlFlow::Break
+                    }
+                });
                 true
             });
 
+            let app_failed = app_download.clone();
+            let entry_id_failed = entry_id.clone();
+            download.connect_failed(move |download, error| {
+                let id = entry_id_failed.get();
+                if id == 0 {
+                    return;
+                }
+                let cancelled = error.matches(webkit6::DownloadError::CancelledByUser);
+                {
+                    let mut state = app_failed.browser_state.borrow_mut();
+                    if let Some(entry) = state.download_mut(id) {
+                        entry.status = if cancelled { "cancelled".into() } else { "failed".into() };
+                        entry.received = download.received_data_length();
+                    }
+                    state.save();
+                }
+                app_failed
+                    .active_downloads
+                    .borrow_mut()
+                    .retain(|(entry_id, _)| *entry_id != id);
+                refresh_downloads_pages(&app_failed);
+            });
+
             let app_finished = app_download.clone();
+            let entry_id_finished = entry_id.clone();
             download.connect_finished(move |download| {
+                let id = entry_id_finished.get();
+                if id != 0 {
+                    {
+                        let mut state = app_finished.browser_state.borrow_mut();
+                        if let Some(entry) = state.download_mut(id) {
+                            if entry.status == "active" {
+                                entry.status = "done".into();
+                                entry.received = download.received_data_length();
+                                if entry.total == 0 {
+                                    entry.total = entry.received;
+                                }
+                            }
+                        }
+                        state.save();
+                    }
+                    app_finished
+                        .active_downloads
+                        .borrow_mut()
+                        .retain(|(entry_id, _)| *entry_id != id);
+                    refresh_downloads_pages(&app_finished);
+                    return;
+                }
+
                 let Some(dest) = download.destination() else {
                     return;
                 };
@@ -1528,7 +2391,8 @@ pub fn run() {
 
         let app_entry = app.clone();
         app.address_entry.connect_activate(move |entry| {
-            if let Some(uri) = normalize_uri(&entry.text()) {
+            let engine = app_entry.browser_state.borrow().settings.search_engine.clone();
+            if let Some(uri) = normalize_uri(&entry.text(), &engine) {
                 load_uri_in_current_tab(&app_entry, &uri);
             }
         });
@@ -1537,13 +2401,7 @@ pub fn run() {
         app.bookmark_button.connect_clicked(move |_| {
             if let Some(tab) = current_tab(&app_bookmark) {
                 let uri = current_uri(&tab.web_view);
-                if uri.is_empty()
-                    || uri == app_bookmark.new_tab_uri
-                    || uri == app_bookmark.history_uri
-                    || uri == app_bookmark.bookmarks_uri
-                    || uri == app_bookmark.settings_uri
-                    || uri == app_bookmark.extensions_uri
-                {
+                if uri.is_empty() || is_internal_uri(&app_bookmark, &uri) {
                     return;
                 }
 
@@ -1587,6 +2445,14 @@ pub fn run() {
         let app_keys = app.clone();
         controller.connect_key_pressed(move |_, key, _, state| {
             if !state.contains(gdk::ModifierType::CONTROL_MASK) {
+                if key == gdk::Key::Escape && state.contains(gdk::ModifierType::SHIFT_MASK) {
+                    open_task_manager(&app_keys);
+                    return glib::Propagation::Stop;
+                }
+                if key == gdk::Key::F9 {
+                    toggle_reading_mode(&app_keys);
+                    return glib::Propagation::Stop;
+                }
                 if key == gdk::Key::Escape {
                     if app_keys.find_bar.is_visible() {
                         close_find_bar(&app_keys);
@@ -1639,6 +2505,17 @@ pub fn run() {
                 }
                 gdk::Key::l | gdk::Key::L => {
                     focus_address_bar(&app_keys);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::n | gdk::Key::N => {
+                    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        open_incognito_window(&app_keys);
+                        return glib::Propagation::Stop;
+                    }
+                    glib::Propagation::Proceed
+                }
+                gdk::Key::j | gdk::Key::J => {
+                    load_uri_in_current_tab(&app_keys, &app_keys.downloads_uri);
                     glib::Propagation::Stop
                 }
                 gdk::Key::r | gdk::Key::R => {

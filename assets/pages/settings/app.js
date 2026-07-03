@@ -10,6 +10,13 @@ const sitePermission = document.getElementById("site-permission");
 const siteValue = document.getElementById("site-value");
 const saveSitePermission = document.getElementById("save-site-permission");
 const siteList = document.getElementById("site-list");
+const searchEngine = document.getElementById("search-engine");
+const downloadDir = document.getElementById("download-dir");
+const saveDownloadDir = document.getElementById("save-download-dir");
+const themeSelect = document.getElementById("theme-select");
+const zoomSelect = document.getElementById("zoom-select");
+const fontSelect = document.getElementById("font-select");
+const passwordList = document.getElementById("password-list");
 
 const permissions = [
   ["notifications", "Notifications", "Let sites show notification prompts."],
@@ -107,13 +114,58 @@ function renderSiteList(sites = []) {
   });
 }
 
+function renderPasswords(items = []) {
+  passwordList.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No saved passwords.";
+    passwordList.append(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const card = document.createElement("article");
+    card.className = "site-card";
+    const head = document.createElement("div");
+    head.className = "site-card-head";
+    const copy = document.createElement("div");
+    const origin = document.createElement("strong");
+    origin.textContent = item.origin;
+    const user = document.createElement("div");
+    user.className = "row-meta";
+    user.textContent = item.username || "(no username)";
+    copy.append(origin, user);
+    const remove = document.createElement("button");
+    remove.className = "ghost";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => post(`delete-credential:${encodeURIComponent(item.origin)}`));
+    head.append(copy, remove);
+    card.append(head);
+    passwordList.append(card);
+  });
+}
+
 window.ubarRenderSettings = function renderSettings(data) {
   homepageInput.value = data.homepageUri || "";
   historyCount.textContent = String(data.historyCount);
   bookmarkCount.textContent = String(data.bookmarkCount);
+  searchEngine.value = data.searchEngine || "duckduckgo";
+  downloadDir.value = data.downloadDir || "";
+  themeSelect.value = data.theme || "system";
+  zoomSelect.value = String(data.defaultZoom || 1);
+  fontSelect.value = String(data.fontSize || 16);
   renderDefaultPermissions(data.defaults || {});
   renderSiteList(data.sites || []);
+  renderPasswords(data.passwords || []);
 };
+
+searchEngine.addEventListener("change", () => post(`save-search-engine:${searchEngine.value}`));
+themeSelect.addEventListener("change", () => post(`save-theme:${themeSelect.value}`));
+zoomSelect.addEventListener("change", () => post(`save-zoom:${zoomSelect.value}`));
+fontSelect.addEventListener("change", () => post(`save-font-size:${fontSelect.value}`));
+saveDownloadDir.addEventListener("click", () => {
+  post(`save-download-dir:${encodeURIComponent(downloadDir.value.trim())}`);
+});
 
 permissions.forEach(([key, label]) => {
   const option = document.createElement("option");

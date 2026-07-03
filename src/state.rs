@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -19,14 +20,57 @@ pub struct BookmarkEntry {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SettingsData {
     pub homepage_uri: String,
+    #[serde(default = "default_search_engine")]
+    pub search_engine: String,
+    #[serde(default)]
+    pub download_dir: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_zoom")]
+    pub default_zoom: f64,
+    #[serde(default = "default_font_size")]
+    pub font_size: u32,
+}
+
+fn default_search_engine() -> String {
+    "duckduckgo".into()
+}
+
+fn default_theme() -> String {
+    "system".into()
+}
+
+fn default_zoom() -> f64 {
+    1.0
+}
+
+fn default_font_size() -> u32 {
+    16
 }
 
 impl Default for SettingsData {
     fn default() -> Self {
         Self {
             homepage_uri: String::new(),
+            search_engine: default_search_engine(),
+            download_dir: String::new(),
+            theme: default_theme(),
+            default_zoom: default_zoom(),
+            font_size: default_font_size(),
         }
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DownloadEntry {
+    pub id: u64,
+    pub uri: String,
+    pub destination: String,
+    pub filename: String,
+    pub received: u64,
+    pub total: u64,
+    pub status: String,
+    pub timestamp: i64,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -36,6 +80,14 @@ pub struct BrowserState {
     pub bookmarks: Vec<BookmarkEntry>,
     #[serde(default)]
     pub open_tabs: Vec<String>,
+    #[serde(default)]
+    pub permission_defaults: BTreeMap<String, String>,
+    #[serde(default)]
+    pub site_permissions: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    pub downloads: Vec<DownloadEntry>,
+    #[serde(default)]
+    pub download_counter: u64,
     #[serde(skip)]
     pub path: PathBuf,
 }
@@ -122,6 +174,48 @@ impl BrowserState {
         );
         self.save();
         true
+    }
+
+    // "ask" unless a site rule or default says otherwise.
+    pub fn permission_for(&self, origin: &str, key: &str) -> String {
+        self.site_permissions
+            .get(origin)
+            .and_then(|rules| rules.get(key))
+            .or_else(|| self.permission_defaults.get(key))
+            .cloned()
+            .unwrap_or_else(|| "ask".into())
+    }
+
+    pub fn set_site_permission(&mut self, origin: &str, key: &str, value: &str) {
+        self.site_permissions
+            .entry(origin.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_string());
+        self.save();
+    }
+
+    pub fn add_download(&mut self, uri: &str, destination: &str, filename: &str, timestamp: i64) -> u64 {
+        self.download_counter += 1;
+        let id = self.download_counter;
+        self.downloads.insert(
+            0,
+            DownloadEntry {
+                id,
+                uri: uri.into(),
+                destination: destination.into(),
+                filename: filename.into(),
+                received: 0,
+                total: 0,
+                status: "active".into(),
+                timestamp,
+            },
+        );
+        self.save();
+        id
+    }
+
+    pub fn download_mut(&mut self, id: u64) -> Option<&mut DownloadEntry> {
+        self.downloads.iter_mut().find(|entry| entry.id == id)
     }
 
     pub fn remove_bookmark(&mut self, uri: &str) -> bool {

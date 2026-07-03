@@ -14,7 +14,10 @@
       <p>Chrome-inspired controls for startup, privacy, site permissions, and browser data.</p>
       <nav>
         <a href="#startup">Startup</a>
+        <a href="#search">Search engine</a>
+        <a href="#downloads">Downloads</a>
         <a href="#privacy">Privacy and security</a>
+        <a href="#passwords">Passwords</a>
         <a href="#site-settings">Site settings</a>
         <a href="#appearance">Appearance</a>
         <a href="#library">Library</a>
@@ -37,6 +40,50 @@
           <button id="save-homepage">Save homepage</button>
           <button class="ghost" id="use-new-tab">Use new tab page</button>
         </div>
+      </article>
+
+      <article class="settings-card" id="search">
+        <div class="card-head">
+          <div>
+            <h2>Search engine</h2>
+            <p>Used when the address bar input is not a URL.</p>
+          </div>
+        </div>
+        <label class="field compact-field">
+          <span>Default search engine</span>
+          <select id="search-engine">
+            <option value="duckduckgo">DuckDuckGo</option>
+            <option value="google">Google</option>
+            <option value="bing">Bing</option>
+            <option value="yandex">Yandex</option>
+          </select>
+        </label>
+      </article>
+
+      <article class="settings-card" id="downloads">
+        <div class="card-head">
+          <div>
+            <h2>Downloads</h2>
+            <p>Where downloaded files are saved. Leave blank for the system Downloads folder.</p>
+          </div>
+        </div>
+        <label class="field">
+          <span>Download location</span>
+          <input id="download-dir" type="text" placeholder="/home/you/Downloads">
+        </label>
+        <div class="button-row">
+          <button id="save-download-dir">Save location</button>
+        </div>
+      </article>
+
+      <article class="settings-card" id="passwords">
+        <div class="card-head">
+          <div>
+            <h2>Passwords</h2>
+            <p>Saved sign-ins are encrypted on disk and autofilled on matching sites.</p>
+          </div>
+        </div>
+        <section id="password-list" class="site-list"></section>
       </article>
 
       <article class="settings-card" id="privacy">
@@ -109,30 +156,49 @@
         <div class="card-head">
           <div>
             <h2>Appearance</h2>
-            <p>The browser now uses a Chrome-like layout: tabs on top, address bar below, and window controls aligned with the tab strip.</p>
+            <p>Theme, default page zoom, and font size apply to all tabs.</p>
           </div>
         </div>
         <div class="settings-list">
           <div class="setting-row">
             <div>
-              <strong>Tab bar</strong>
-              <span>Tabs are above the address bar.</span>
+              <strong>Theme</strong>
+              <span>Light, dark, or follow the operating system.</span>
             </div>
-            <span class="pill">Top</span>
+            <select id="theme-select">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
           </div>
           <div class="setting-row">
             <div>
-              <strong>Address bar controls</strong>
-              <span>Back, forward, and reload are on the left. Bookmark and menu are on the right.</span>
+              <strong>Default page zoom</strong>
+              <span>Applied to every new page.</span>
             </div>
-            <span class="pill">Updated</span>
+            <select id="zoom-select">
+              <option value="0.75">75%</option>
+              <option value="0.9">90%</option>
+              <option value="1">100%</option>
+              <option value="1.1">110%</option>
+              <option value="1.25">125%</option>
+              <option value="1.5">150%</option>
+              <option value="2">200%</option>
+            </select>
           </div>
           <div class="setting-row">
             <div>
-              <strong>Native title bar</strong>
-              <span>Removed, with window controls flushed into the tab bar.</span>
+              <strong>Font size</strong>
+              <span>Default text size for pages that do not set their own.</span>
             </div>
-            <span class="pill">Hidden</span>
+            <select id="font-select">
+              <option value="12">12</option>
+              <option value="14">14</option>
+              <option value="16">16</option>
+              <option value="18">18</option>
+              <option value="20">20</option>
+              <option value="24">24</option>
+            </select>
           </div>
         </div>
       </article>
