@@ -423,6 +423,15 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     });
 }
 
+fn navigate_tab(tab: &TabState, uri: &str) {
+    let web_view = tab.web_view.clone();
+    let target = uri.to_string();
+    if tab.loading.get() {
+        web_view.stop_loading();
+    }
+    glib::idle_add_local_once(move || web_view.load_uri(&target));
+}
+
 fn remove_tab_at(app: &Rc<AppState>, index: u32) {
     let Some(page) = app.notebook.nth_page(Some(index)) else {
         return;
@@ -574,14 +583,14 @@ fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
             app.notebook.set_current_page(Some(index));
             update_active_tab_styles(&app.notebook, index);
         }
-        tab.web_view.load_uri(uri);
+        navigate_tab(&tab, uri);
         return;
     }
 
     if app.notebook.n_pages() > 0 {
         select_tab(app, 0);
         if let Some(tab) = current_tab(app) {
-            tab.web_view.load_uri(uri);
+            navigate_tab(&tab, uri);
         }
     }
 }
