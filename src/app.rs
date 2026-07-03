@@ -18,7 +18,7 @@ use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
 
 const APP_ID: &str = "dev.ghanti.ubar";
 const TAB_WIDTH: i32 = 220;
-const TAB_HEIGHT: i32 = 38;
+const TAB_HEIGHT: i32 = 34;
 const TAB_ANIMATION_MS: u32 = 140;
 
 #[derive(Clone)]
@@ -723,14 +723,14 @@ pub fn run() {
         tabs_row.set_hexpand(true);
         tabs_row.set_margin_start(6);
         tabs_row.set_margin_end(6);
-        tabs_row.set_margin_top(4);
-        tabs_row.set_margin_bottom(4);
+        tabs_row.set_margin_top(2);
+        tabs_row.set_margin_bottom(2);
         tabs_row.append(&tab_scroller);
         tabs_row.append(&new_tab_button);
 
         let header_bar = HeaderBar::new();
         header_bar.set_show_title_buttons(false);
-        header_bar.set_title_widget(Some(&tabs_row));
+        header_bar.pack_start(&tabs_row);
         header_bar.pack_end(&window_controls);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
