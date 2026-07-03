@@ -31,6 +31,7 @@ struct AppState {
     window: ApplicationWindow,
     notebook: Notebook,
     tab_bar: GtkBox,
+    tab_scroller: ScrolledWindow,
     back_button: Button,
     forward_button: Button,
     reload_button: Button,
@@ -84,6 +85,15 @@ fn current_tab(app: &AppState) -> Option<TabState> {
 fn focus_address_bar(app: &AppState) {
     app.address_entry.grab_focus();
     app.address_entry.select_region(0, -1);
+}
+
+fn scroll_tab_strip_to_end(app: &AppState) {
+    let scroller = app.tab_scroller.clone();
+    glib::idle_add_local_once(move || {
+        let adj = scroller.hadjustment();
+        let target = (adj.upper() - adj.page_size()).max(adj.lower());
+        adj.set_value(target);
+    });
 }
 
 fn sync_tab_bar_order(app: &Rc<AppState>) {
@@ -598,12 +608,14 @@ pub fn run() {
         css.load_from_data(
             "
             .ubar-tab {
-                border-bottom: 2px solid transparent;
-                border-radius: 0;
+                border-radius: 10px;
+                background: transparent;
+                transition: 140ms ease;
             }
 
             .ubar-tab-active {
-                border-bottom-color: @accent_color;
+                background: alpha(@accent_color, 0.18);
+                box-shadow: inset 0 0 0 1px alpha(@accent_color, 0.45);
             }
             ",
         );
@@ -674,6 +686,7 @@ pub fn run() {
             window,
             notebook,
             tab_bar,
+            tab_scroller,
             back_button,
             forward_button,
             reload_button,
@@ -753,6 +766,7 @@ pub fn run() {
                 app_new.notebook.set_current_page(Some(index));
                 sync_window(&app_new, &tab);
                 focus_address_bar(&app_new);
+                scroll_tab_strip_to_end(&app_new);
             }
         });
 
@@ -813,6 +827,7 @@ pub fn run() {
                         app_keys.notebook.set_current_page(Some(index));
                         sync_window(&app_keys, &tab);
                         focus_address_bar(&app_keys);
+                        scroll_tab_strip_to_end(&app_keys);
                     }
                     glib::Propagation::Stop
                 }
