@@ -94,13 +94,13 @@ const FIREFOX_UA: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0";
 #[cfg(target_os = "macos")]
 const CHROME_UA: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 #[cfg(not(target_os = "macos"))]
 const FIREFOX_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 #[cfg(not(target_os = "macos"))]
 const CHROME_UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 // Stores sniff the UA to decide which install button to show.
 fn apply_site_user_agent(view: &WebView) {
@@ -1317,7 +1317,7 @@ function addBtn(){
   var old=document.getElementById('ubar-install');
   var m=location.pathname.match(/\/detail\/[^\/]+\/([a-p]{32})/);
   if(!m){if(old)old.remove();return;}
-  var url='https://clients2.google.com/service/update2/crx?response=redirect&prodversion=126.0.0.0&acceptformat=crx2,crx3&x=id%3D'+m[1]+'%26uc';
+  var url='https://clients2.google.com/service/update2/crx?response=redirect&prodversion=140.0.0.0&acceptformat=crx2,crx3&x=id%3D'+m[1]+'%26uc';
   if(old){old.dataset.href=url;return;}
   var b=document.createElement('button');
   b.id='ubar-install';b.textContent='Install in ubar';b.dataset.href=url;
