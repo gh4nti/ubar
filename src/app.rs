@@ -696,7 +696,6 @@ pub fn run() {
         let menu_button = MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         let window_controls = WindowControls::new(PackType::End);
-        let title_spacer = GtkBox::new(Orientation::Horizontal, 0);
 
         let notebook = Notebook::new();
         notebook.set_show_tabs(false);
@@ -732,11 +731,14 @@ pub fn run() {
         end_controls.append(&new_tab_button);
         end_controls.append(&window_controls);
 
+        let header_row = GtkBox::new(Orientation::Horizontal, 8);
+        header_row.set_hexpand(true);
+        header_row.append(&tabs_row);
+        header_row.append(&end_controls);
+
         let header_bar = HeaderBar::new();
         header_bar.set_show_title_buttons(false);
-        header_bar.set_title_widget(Some(&title_spacer));
-        header_bar.pack_start(&tabs_row);
-        header_bar.pack_end(&end_controls);
+        header_bar.set_title_widget(Some(&header_row));
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
         toolbar.set_margin_top(6);
