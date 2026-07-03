@@ -589,7 +589,8 @@ fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
 fn handle_script_message(app: &Rc<AppState>, message: &str) {
     if let Some(uri) = message.strip_prefix("open:") {
         let decoded = glib::uri_unescape_string(uri, None::<&str>).unwrap_or_default();
-        load_uri_in_current_tab(app, &decoded);
+        let app_open = app.clone();
+        glib::idle_add_local_once(move || load_uri_in_current_tab(&app_open, &decoded));
         return;
     }
 
