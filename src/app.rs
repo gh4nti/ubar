@@ -5,8 +5,9 @@ use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick,
-    Image, Label, MenuButton, Notebook, Orientation, Popover,
+    Application, ApplicationWindow, Box as GtkBox, Button, DragSource, DropTarget, Entry,
+    EventControllerKey, GestureClick, Image, Label, MenuButton, Notebook, Orientation, Popover,
+    ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -78,6 +79,54 @@ fn current_tab(app: &AppState) -> Option<TabState> {
     let page = app.notebook.nth_page(Some(page_num))?;
     unsafe { page.data::<TabState>("tab-state") }
         .map(|ptr| unsafe { ptr.as_ref().clone() })
+}
+
+fn focus_address_bar(app: &AppState) {
+    app.address_entry.grab_focus();
+    app.address_entry.select_region(0, -1);
+}
+
+fn sync_tab_bar_order(app: &Rc<AppState>) {
+    let total = app.notebook.n_pages();
+    let mut previous: Option<GtkBox> = None;
+    for index in 0..total {
+        if let Some(page) = app.notebook.nth_page(Some(index))
+            && let Some(tab) = unsafe { page
+                .data::<TabState>("tab-state") }
+                .map(|ptr| unsafe { ptr.as_ref().clone() })
+        {
+            app.tab_bar.reorder_child_after(&tab.tab_box, previous.as_ref());
+            previous = Some(tab.tab_box);
+        }
+    }
+}
+
+fn select_tab(app: &Rc<AppState>, index: u32) {
+    if index >= app.notebook.n_pages() {
+        return;
+    }
+
+    app.notebook.set_current_page(Some(index));
+    if let Some(page) = app.notebook.nth_page(Some(index))
+        && let Some(tab) = unsafe { page
+            .data::<TabState>("tab-state") }
+            .map(|ptr| unsafe { ptr.as_ref().clone() })
+    {
+        sync_window(app, &tab);
+    }
+}
+
+fn move_tab(app: &Rc<AppState>, source: u32, target: u32) {
+    if source == target || source >= app.notebook.n_pages() || target >= app.notebook.n_pages() {
+        return;
+    }
+
+    let Some(page) = app.notebook.nth_page(Some(source)) else {
+        return;
+    };
+
+    app.notebook.reorder_child(&page, Some(target));
+    sync_tab_bar_order(app);
 }
 
 fn update_bookmark_button(app: &AppState) {
@@ -409,6 +458,38 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     });
     tab_box.add_controller(select_click);
 
+    let drag_source = DragSource::new();
+    drag_source.set_actions(gdk::DragAction::MOVE);
+    let app_drag = app.clone();
+    let view_drag = web_view.clone();
+    drag_source.connect_prepare(move |_, _, _| {
+        let index = app_drag
+            .notebook
+            .page_num(&view_drag)
+            .map(|index| index as i32)
+            .unwrap_or(-1);
+        Some(gdk::ContentProvider::for_value(&index.to_value()))
+    });
+    tab_box.add_controller(drag_source);
+
+    let drop_target = DropTarget::new(i32::static_type(), gdk::DragAction::MOVE);
+    let app_drop = app.clone();
+    let view_drop = web_view.clone();
+    drop_target.connect_drop(move |_, value, _, _| {
+        let Ok(source) = value.get::<i32>() else {
+            return false;
+        };
+        let Some(target) = app_drop.notebook.page_num(&view_drop) else {
+            return false;
+        };
+        if source < 0 {
+            return false;
+        }
+        move_tab(&app_drop, source as u32, target);
+        true
+    });
+    tab_box.add_controller(drop_target);
+
     let app_uri = app.clone();
     let tab_uri_ref = tab.clone();
     web_view.connect_uri_notify(move |_| {
@@ -555,11 +636,17 @@ pub fn run() {
 
         let tab_bar = GtkBox::new(Orientation::Horizontal, 0);
         tab_bar.set_hexpand(true);
+        let tab_scroller = ScrolledWindow::new();
+        tab_scroller.set_hexpand(true);
+        tab_scroller.set_vexpand(false);
+        tab_scroller.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
+        tab_scroller.set_vscrollbar_policy(gtk4::PolicyType::Never);
+        tab_scroller.set_child(Some(&tab_bar));
 
         let tabs_row = GtkBox::new(Orientation::Horizontal, 6);
         tabs_row.set_margin_start(6);
         tabs_row.set_margin_end(6);
-        tabs_row.append(&tab_bar);
+        tabs_row.append(&tab_scroller);
         tabs_row.append(&new_tab_button);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
@@ -665,6 +752,7 @@ pub fn run() {
             if let Some(index) = app_new.notebook.page_num(&tab.web_view) {
                 app_new.notebook.set_current_page(Some(index));
                 sync_window(&app_new, &tab);
+                focus_address_bar(&app_new);
             }
         });
 
@@ -704,18 +792,32 @@ pub fn run() {
                 return glib::Propagation::Proceed;
             }
 
+            if key == gdk::Key::Tab {
+                let total = app_keys.notebook.n_pages();
+                if total > 0 {
+                    let current = app_keys.notebook.current_page().unwrap_or(0);
+                    let next = if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        if current == 0 { total - 1 } else { current - 1 }
+                    } else {
+                        (current + 1) % total
+                    };
+                    select_tab(&app_keys, next);
+                }
+                return glib::Propagation::Stop;
+            }
+
             match key {
                 gdk::Key::t | gdk::Key::T => {
                     let tab = create_tab(&app_keys, &app_keys.new_tab_uri);
                     if let Some(index) = app_keys.notebook.page_num(&tab.web_view) {
                         app_keys.notebook.set_current_page(Some(index));
                         sync_window(&app_keys, &tab);
+                        focus_address_bar(&app_keys);
                     }
                     glib::Propagation::Stop
                 }
                 gdk::Key::l | gdk::Key::L => {
-                    app_keys.address_entry.grab_focus();
-                    app_keys.address_entry.select_region(0, -1);
+                    focus_address_bar(&app_keys);
                     glib::Propagation::Stop
                 }
                 gdk::Key::r | gdk::Key::R => {
@@ -740,6 +842,45 @@ pub fn run() {
                 }
                 gdk::Key::h | gdk::Key::H => {
                     load_uri_in_current_tab(&app_keys, &app_keys.history_uri);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_1 => {
+                    select_tab(&app_keys, 0);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_2 => {
+                    select_tab(&app_keys, 1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_3 => {
+                    select_tab(&app_keys, 2);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_4 => {
+                    select_tab(&app_keys, 3);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_5 => {
+                    select_tab(&app_keys, 4);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_6 => {
+                    select_tab(&app_keys, 5);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_7 => {
+                    select_tab(&app_keys, 6);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_8 => {
+                    select_tab(&app_keys, 7);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_9 => {
+                    let total = app_keys.notebook.n_pages();
+                    if total > 0 {
+                        select_tab(&app_keys, total - 1);
+                    }
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
