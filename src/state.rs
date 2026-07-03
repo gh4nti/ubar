@@ -34,6 +34,8 @@ pub struct BrowserState {
     pub settings: SettingsData,
     pub history: Vec<HistoryEntry>,
     pub bookmarks: Vec<BookmarkEntry>,
+    #[serde(default)]
+    pub open_tabs: Vec<String>,
     #[serde(skip)]
     pub path: PathBuf,
 }

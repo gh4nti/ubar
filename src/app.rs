@@ -14,7 +14,11 @@ use gtk4::{
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use webkit6::prelude::*;
-use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
+use webkit6::{
+    CookiePersistentStorage, FindOptions, LoadEvent, NetworkSession, Settings,
+    UserContentInjectedFrames, UserContentManager, UserScript, UserScriptInjectionTime,
+    UserStyleLevel, UserStyleSheet, WebView,
+};
 
 const APP_ID: &str = "dev.ghanti.ubar";
 const TAB_WIDTH: i32 = 220;
@@ -45,6 +49,11 @@ struct AppState {
     bookmark_button: Button,
     new_tab_button: Button,
     menu_button: MenuButton,
+    find_bar: GtkBox,
+    find_entry: Entry,
+    network_session: NetworkSession,
+    extensions: crate::extensions::Extensions,
+    closed_tabs: RefCell<Vec<String>>,
     browser_state: RefCell<BrowserState>,
     new_tab_uri: String,
     history_uri: String,
@@ -60,6 +69,12 @@ fn normalize_uri(input: &str) -> Option<String> {
 
     if trimmed.contains("://") {
         return Some(trimmed.to_string());
+    }
+
+    // Looks like a search query, not a host -> web search.
+    if trimmed.contains(' ') || (!trimmed.contains('.') && !trimmed.contains(':')) {
+        let query = glib::Uri::escape_string(trimmed, None, false);
+        return Some(format!("https://duckduckgo.com/?q={query}"));
     }
 
     Some(format!("https://{trimmed}"))
@@ -94,6 +109,68 @@ fn current_tab(app: &AppState) -> Option<TabState> {
 fn focus_address_bar(app: &AppState) {
     app.address_entry.grab_focus();
     app.address_entry.select_region(0, -1);
+}
+
+fn find_search(app: &AppState) {
+    let text = app.find_entry.text();
+    if let Some(tab) = current_tab(app)
+        && let Some(finder) = tab.web_view.find_controller()
+    {
+        if text.is_empty() {
+            finder.search_finish();
+        } else {
+            finder.search(
+                &text,
+                (FindOptions::CASE_INSENSITIVE | FindOptions::WRAP_AROUND).bits(),
+                u32::MAX,
+            );
+        }
+    }
+}
+
+fn open_find_bar(app: &AppState) {
+    app.find_bar.set_visible(true);
+    app.find_entry.grab_focus();
+    app.find_entry.select_region(0, -1);
+}
+
+fn close_find_bar(app: &AppState) {
+    app.find_bar.set_visible(false);
+    if let Some(tab) = current_tab(app)
+        && let Some(finder) = tab.web_view.find_controller()
+    {
+        finder.search_finish();
+    }
+    tab_grab_focus(app);
+}
+
+fn tab_grab_focus(app: &AppState) {
+    if let Some(tab) = current_tab(app) {
+        tab.web_view.grab_focus();
+    }
+}
+
+fn zoom_current_tab(app: &AppState, delta: f64) {
+    if let Some(tab) = current_tab(app) {
+        if delta == 0.0 {
+            tab.web_view.set_zoom_level(1.0);
+        } else {
+            let level = (tab.web_view.zoom_level() + delta).clamp(0.3, 5.0);
+            tab.web_view.set_zoom_level(level);
+        }
+    }
+}
+
+fn reopen_closed_tab(app: &Rc<AppState>) {
+    let Some(uri) = app.closed_tabs.borrow_mut().pop() else {
+        return;
+    };
+    let tab = create_tab(app, &uri);
+    if let Some(index) = app.notebook.page_num(&tab.web_view) {
+        app.notebook.set_current_page(Some(index));
+        sync_window(app, &tab);
+        scroll_tab_strip_to_end(app);
+    }
 }
 
 fn scroll_tab_strip_to_end(app: &AppState) {
@@ -394,6 +471,11 @@ fn close_tab(app: &Rc<AppState>, tab: &TabState) {
     let current_page = app.notebook.current_page();
     let page_count = app.notebook.n_pages();
 
+    let closed_uri = current_uri(&tab.web_view);
+    if !closed_uri.is_empty() && closed_uri != app.new_tab_uri {
+        app.closed_tabs.borrow_mut().push(closed_uri);
+    }
+
     if page_count == 1 {
         app.window.close();
         return;
@@ -627,12 +709,43 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
     }
 }
 
+fn inject_extensions(app: &AppState, manager: &UserContentManager) {
+    for script in &app.extensions.scripts {
+        let allow: Vec<&str> = script.allowlist.iter().map(String::as_str).collect();
+        let time = if script.at_start {
+            UserScriptInjectionTime::Start
+        } else {
+            UserScriptInjectionTime::End
+        };
+        manager.add_script(&UserScript::for_world(
+            &script.source,
+            UserContentInjectedFrames::TopFrame,
+            time,
+            "ubar-ext",
+            &allow,
+            &[],
+        ));
+    }
+    for style in &app.extensions.styles {
+        let allow: Vec<&str> = style.allowlist.iter().map(String::as_str).collect();
+        manager.add_style_sheet(&UserStyleSheet::new(
+            &style.source,
+            UserContentInjectedFrames::TopFrame,
+            UserStyleLevel::Author,
+            &allow,
+            &[],
+        ));
+    }
+}
+
 fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let manager = UserContentManager::new();
     let _ = manager.register_script_message_handler("ubar", None::<&str>);
+    inject_extensions(app, &manager);
 
     let web_view: WebView = glib::Object::builder()
         .property("user-content-manager", &manager)
+        .property("network-session", &app.network_session)
         .build();
     configure_web_view(&web_view);
 
@@ -795,6 +908,19 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let tab_icon = tab.clone();
     web_view.connect_favicon_notify(move |_| update_tab_favicon(&tab_icon));
 
+    // window.open / target=_blank -> new tab.
+    let app_create = app.clone();
+    web_view.connect_create(move |_, action| {
+        if let Some(uri) = action.request().and_then(|request| request.uri()) {
+            let tab = create_tab(&app_create, &uri);
+            if let Some(index) = app_create.notebook.page_num(&tab.web_view) {
+                app_create.notebook.set_current_page(Some(index));
+                scroll_tab_strip_to_end(&app_create);
+            }
+        }
+        None
+    });
+
     let tab_audio = tab.clone();
     web_view.connect_is_playing_audio_notify(move |_| update_tab_audio(&tab_audio));
 
@@ -852,10 +978,12 @@ fn build_menu(app: &Rc<AppState>) {
     let home = Button::with_label("Home");
     let history = Button::with_label("History");
     let bookmarks = Button::with_label("Bookmarks");
+    let downloads = Button::with_label("Downloads");
     let settings = Button::with_label("Settings");
     menu_box.append(&home);
     menu_box.append(&history);
     menu_box.append(&bookmarks);
+    menu_box.append(&downloads);
     menu_box.append(&settings);
 
     let popover = Popover::new();
@@ -877,6 +1005,16 @@ fn build_menu(app: &Rc<AppState>) {
 
     let app_bookmarks = app.clone();
     bookmarks.connect_clicked(move |_| load_uri_in_current_tab(&app_bookmarks, &app_bookmarks.bookmarks_uri));
+
+    downloads.connect_clicked(move |_| {
+        let dir = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let _ = gio::AppInfo::launch_default_for_uri(
+            &format!("file://{}", dir.to_string_lossy()),
+            None::<&gio::AppLaunchContext>,
+        );
+    });
 
     let app_settings = app.clone();
     settings.connect_clicked(move |_| load_uri_in_current_tab(&app_settings, &app_settings.settings_uri));
@@ -919,6 +1057,40 @@ pub fn run() {
             .ubar-tab-audio {
                 min-width: 14px;
                 min-height: 14px;
+            }
+
+            .ubar-toolbar {
+                background: alpha(currentColor, 0.02);
+            }
+
+            .ubar-toolbar button {
+                border-radius: 999px;
+                min-width: 30px;
+                min-height: 30px;
+                padding: 4px;
+            }
+
+            .ubar-address {
+                border-radius: 999px;
+                padding: 0 14px;
+                background: alpha(currentColor, 0.06);
+                border: none;
+                box-shadow: none;
+            }
+
+            .ubar-address:focus {
+                background: alpha(@accent_color, 0.08);
+                box-shadow: 0 0 0 2px alpha(@accent_color, 0.4);
+            }
+
+            .ubar-find-bar {
+                padding: 6px;
+                border-radius: 10px;
+                background: alpha(currentColor, 0.05);
+            }
+
+            .ubar-find-bar entry {
+                border-radius: 999px;
             }
             ",
         );
@@ -991,6 +1163,8 @@ pub fn run() {
         header_bar.set_title_widget(Some(&header_row));
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
+        toolbar.add_css_class("ubar-toolbar");
+        address_entry.add_css_class("ubar-address");
         toolbar.set_margin_top(6);
         toolbar.set_margin_bottom(6);
         toolbar.set_margin_start(6);
@@ -1006,11 +1180,71 @@ pub fn run() {
         toolbar.append(&bookmark_button);
         toolbar.append(&menu_button);
 
+        // Find-in-page bar (hidden until Ctrl+F).
+        let find_entry = Entry::new();
+        find_entry.set_placeholder_text(Some("Find in page"));
+        find_entry.set_width_request(280);
+        let find_prev = Button::from_icon_name("go-up-symbolic");
+        let find_next = Button::from_icon_name("go-down-symbolic");
+        let find_close = Button::from_icon_name("window-close-symbolic");
+        for button in [&find_prev, &find_next, &find_close] {
+            button.set_has_frame(false);
+        }
+        let find_bar = GtkBox::new(Orientation::Horizontal, 6);
+        find_bar.add_css_class("ubar-find-bar");
+        find_bar.set_halign(Align::End);
+        find_bar.set_margin_start(6);
+        find_bar.set_margin_end(6);
+        find_bar.set_margin_bottom(6);
+        find_bar.append(&find_entry);
+        find_bar.append(&find_prev);
+        find_bar.append(&find_next);
+        find_bar.append(&find_close);
+        find_bar.set_visible(false);
+
         let vbox = GtkBox::new(Orientation::Vertical, 0);
         vbox.append(&toolbar);
+        vbox.append(&find_bar);
         vbox.append(&notebook);
         window.set_titlebar(Some(&header_bar));
         window.set_child(Some(&vbox));
+
+        // Persistent session: cookies, cache, favicons, downloads.
+        let data_root = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("ubar");
+        let cache_root = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("ubar");
+        let network_session = NetworkSession::new(
+            data_root.join("web-data").to_str(),
+            cache_root.to_str(),
+        );
+        if let Some(cookies) = network_session.cookie_manager() {
+            cookies.set_persistent_storage(
+                &data_root.join("cookies.sqlite").to_string_lossy(),
+                CookiePersistentStorage::Sqlite,
+            );
+        }
+        if let Some(data_manager) = network_session.website_data_manager() {
+            data_manager.set_favicons_enabled(true);
+        }
+        network_session.connect_download_started(|_, download| {
+            download.connect_decide_destination(|download, suggested| {
+                let dir = dirs::download_dir()
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let name = if suggested.is_empty() { "download" } else { suggested };
+                let mut path = dir.join(name);
+                let mut counter = 1;
+                while path.exists() {
+                    path = dir.join(format!("{counter}-{name}"));
+                    counter += 1;
+                }
+                download.set_destination(&path.to_string_lossy());
+                true
+            });
+        });
 
         let app = Rc::new(AppState {
             window,
@@ -1024,6 +1258,11 @@ pub fn run() {
             bookmark_button,
             new_tab_button,
             menu_button,
+            find_bar,
+            find_entry,
+            network_session,
+            extensions: crate::extensions::load(),
+            closed_tabs: RefCell::new(Vec::new()),
             browser_state: RefCell::new(BrowserState::load()),
             new_tab_uri: asset_uri("assets/newtab/index.html"),
             history_uri: asset_uri("assets/pages/history/index.html"),
@@ -1032,6 +1271,56 @@ pub fn run() {
         });
 
         build_menu(&app);
+
+        let app_find_changed = app.clone();
+        app.find_entry.connect_changed(move |_| find_search(&app_find_changed));
+        let app_find_activate = app.clone();
+        app.find_entry.connect_activate(move |_| {
+            if let Some(tab) = current_tab(&app_find_activate)
+                && let Some(finder) = tab.web_view.find_controller()
+            {
+                finder.search_next();
+            }
+        });
+        let app_find_prev = app.clone();
+        find_prev.connect_clicked(move |_| {
+            if let Some(tab) = current_tab(&app_find_prev)
+                && let Some(finder) = tab.web_view.find_controller()
+            {
+                finder.search_previous();
+            }
+        });
+        let app_find_next = app.clone();
+        find_next.connect_clicked(move |_| {
+            if let Some(tab) = current_tab(&app_find_next)
+                && let Some(finder) = tab.web_view.find_controller()
+            {
+                finder.search_next();
+            }
+        });
+        let app_find_close = app.clone();
+        find_close.connect_clicked(move |_| close_find_bar(&app_find_close));
+
+        // Save open tabs for session restore.
+        let app_quit = app.clone();
+        app.window.connect_close_request(move |_| {
+            let mut uris = Vec::new();
+            for index in 0..app_quit.notebook.n_pages() {
+                if let Some(page) = app_quit.notebook.nth_page(Some(index))
+                    && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
+                        .map(|ptr| unsafe { ptr.as_ref().clone() })
+                {
+                    let uri = current_uri(&tab.web_view);
+                    if !uri.is_empty() {
+                        uris.push(uri);
+                    }
+                }
+            }
+            let mut state = app_quit.browser_state.borrow_mut();
+            state.open_tabs = uris;
+            state.save();
+            glib::Propagation::Proceed
+        });
 
         let app_back = app.clone();
         app.back_button.connect_clicked(move |_| {
@@ -1119,10 +1408,22 @@ pub fn run() {
         controller.connect_key_pressed(move |_, key, _, state| {
             if !state.contains(gdk::ModifierType::CONTROL_MASK) {
                 if key == gdk::Key::Escape {
+                    if app_keys.find_bar.is_visible() {
+                        close_find_bar(&app_keys);
+                        return glib::Propagation::Stop;
+                    }
                     if let Some(tab) = current_tab(&app_keys) && tab.loading.get() {
                         tab.web_view.stop_loading();
                         return glib::Propagation::Stop;
                     }
+                }
+                if key == gdk::Key::F12 {
+                    if let Some(tab) = current_tab(&app_keys)
+                        && let Some(inspector) = tab.web_view.inspector()
+                    {
+                        inspector.show();
+                    }
+                    return glib::Propagation::Stop;
                 }
                 return glib::Propagation::Proceed;
             }
@@ -1143,6 +1444,10 @@ pub fn run() {
 
             match key {
                 gdk::Key::t | gdk::Key::T => {
+                    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        reopen_closed_tab(&app_keys);
+                        return glib::Propagation::Stop;
+                    }
                     let tab = create_tab(&app_keys, &app_keys.new_tab_uri);
                     if let Some(index) = app_keys.notebook.page_num(&tab.web_view) {
                         app_keys.notebook.set_current_page(Some(index));
@@ -1178,6 +1483,22 @@ pub fn run() {
                 }
                 gdk::Key::h | gdk::Key::H => {
                     load_uri_in_current_tab(&app_keys, &app_keys.history_uri);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::f | gdk::Key::F => {
+                    open_find_bar(&app_keys);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::plus | gdk::Key::equal => {
+                    zoom_current_tab(&app_keys, 0.1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::minus => {
+                    zoom_current_tab(&app_keys, -0.1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::_0 => {
+                    zoom_current_tab(&app_keys, 0.0);
                     glib::Propagation::Stop
                 }
                 gdk::Key::_1 => {
@@ -1224,10 +1545,16 @@ pub fn run() {
         });
         app.window.add_controller(controller);
 
-        let first = create_tab(&app, &app.new_tab_uri);
-        if let Some(index) = app.notebook.page_num(&first.web_view) {
-            select_tab(&app, index);
+        // Restore last session, fall back to one fresh tab.
+        let restore = app.browser_state.borrow().open_tabs.clone();
+        if restore.is_empty() {
+            create_tab(&app, &app.new_tab_uri);
+        } else {
+            for uri in &restore {
+                create_tab(&app, uri);
+            }
         }
+        select_tab(&app, 0);
 
         unsafe {
             app.window.set_data("app-state", app.clone());
