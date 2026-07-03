@@ -447,8 +447,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     let tab_box = GtkBox::new(Orientation::Horizontal, 8);
     tab_box.add_css_class("ubar-tab");
-    tab_box.set_margin_top(4);
-    tab_box.set_margin_bottom(4);
+    tab_box.set_margin_top(2);
+    tab_box.set_margin_bottom(2);
     tab_box.set_margin_start(6);
     tab_box.set_margin_end(6);
     tab_box.set_halign(Align::Start);
@@ -696,6 +696,7 @@ pub fn run() {
         let menu_button = MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         let window_controls = WindowControls::new(PackType::End);
+        let title_spacer = GtkBox::new(Orientation::Horizontal, 0);
 
         let notebook = Notebook::new();
         notebook.set_show_tabs(false);
@@ -726,12 +727,16 @@ pub fn run() {
         tabs_row.set_margin_top(2);
         tabs_row.set_margin_bottom(2);
         tabs_row.append(&tab_scroller);
-        tabs_row.append(&new_tab_button);
+
+        let end_controls = GtkBox::new(Orientation::Horizontal, 6);
+        end_controls.append(&new_tab_button);
+        end_controls.append(&window_controls);
 
         let header_bar = HeaderBar::new();
         header_bar.set_show_title_buttons(false);
+        header_bar.set_title_widget(Some(&title_spacer));
         header_bar.pack_start(&tabs_row);
-        header_bar.pack_end(&window_controls);
+        header_bar.pack_end(&end_controls);
 
         let toolbar = GtkBox::new(Orientation::Horizontal, 6);
         toolbar.set_margin_top(6);
@@ -739,6 +744,7 @@ pub fn run() {
         toolbar.set_margin_start(6);
         toolbar.set_margin_end(6);
         address_entry.set_hexpand(true);
+        address_entry.set_height_request(TAB_HEIGHT);
         bookmark_button.set_has_frame(false);
         new_tab_button.set_has_frame(false);
         toolbar.append(&back_button);
