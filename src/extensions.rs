@@ -36,8 +36,88 @@ pub struct ExtStyle {
 #[derive(Default)]
 pub struct Extensions {
     pub names: Vec<String>,
+    pub dirs: Vec<PathBuf>,
     pub scripts: Vec<ExtScript>,
     pub styles: Vec<ExtStyle>,
+}
+
+pub fn root() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("ubar")
+        .join("extensions")
+}
+
+// CRX = zip with a signed header prefix; XPI = plain zip. Returns zip offset.
+fn zip_start(bytes: &[u8]) -> usize {
+    if bytes.len() > 16 && &bytes[0..4] == b"Cr24" {
+        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        if version == 2 {
+            let pk = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+            let sig = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+            return 16 + pk + sig;
+        }
+        if version == 3 {
+            let hlen = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+            return 12 + hlen;
+        }
+    }
+    0
+}
+
+// Install a downloaded .xpi/.crx into the extensions dir. Returns extension name.
+pub fn install_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let start = zip_start(&bytes);
+    if start >= bytes.len() {
+        return Err("corrupt archive".into());
+    }
+    let cursor = std::io::Cursor::new(&bytes[start..]);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+
+    let manifest_text = {
+        use std::io::Read;
+        let mut file = archive.by_name("manifest.json").map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        file.read_to_string(&mut text).map_err(|e| e.to_string())?;
+        text
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).map_err(|e| e.to_string())?;
+    let raw_name = manifest["name"].as_str().unwrap_or("extension");
+    // ponytail: __MSG_*__ names need _locales lookup; fall back to file stem.
+    let name = if raw_name.starts_with("__MSG_") {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "extension".into())
+    } else {
+        raw_name.to_string()
+    };
+
+    let dir_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if dir_name.is_empty() {
+        return Err("bad extension name".into());
+    }
+    let target = root().join(dir_name);
+    let _ = fs::remove_dir_all(&target);
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    archive.extract(&target).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+pub fn uninstall(name: &str, extensions: &Extensions) -> bool {
+    if let Some(index) = extensions.names.iter().position(|n| n == name)
+        && let Some(dir) = extensions.dirs.get(index)
+        && dir.starts_with(root())
+    {
+        return fs::remove_dir_all(dir).is_ok();
+    }
+    false
 }
 
 // Firefox match patterns -> WebKit user content allowlist patterns.
@@ -137,16 +217,14 @@ fn load_one(dir: &Path, out: &mut Extensions) -> Option<()> {
     }
 
     out.names.push(if manifest.name.is_empty() { id } else { manifest.name });
+    out.dirs.push(dir.to_path_buf());
     Some(())
 }
 
-// Loads unpacked Firefox-style extensions from <data_dir>/ubar/extensions/<name>/.
+// Loads unpacked Firefox/Chrome-style extensions from <data_dir>/ubar/extensions/<name>/.
 pub fn load() -> Extensions {
     let mut out = Extensions::default();
-    let root = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ubar")
-        .join("extensions");
+    let root = root();
     let _ = fs::create_dir_all(&root);
 
     if let Ok(entries) = fs::read_dir(&root) {
@@ -180,6 +258,17 @@ mod tests {
                 "https://example.com/*"
             ]
         );
+    }
+
+    #[test]
+    fn crx_header_skipped() {
+        let mut crx3 = b"Cr24".to_vec();
+        crx3.extend(3u32.to_le_bytes());
+        crx3.extend(5u32.to_le_bytes());
+        crx3.extend([0u8; 5]);
+        crx3.extend(b"PKzip");
+        assert_eq!(zip_start(&crx3), 17);
+        assert_eq!(zip_start(b"PK\x03\x04 plain zip content here"), 0);
     }
 
     #[test]

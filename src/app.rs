@@ -52,13 +52,35 @@ struct AppState {
     find_bar: GtkBox,
     find_entry: Entry,
     network_session: NetworkSession,
-    extensions: crate::extensions::Extensions,
+    extensions: RefCell<crate::extensions::Extensions>,
     closed_tabs: RefCell<Vec<String>>,
     browser_state: RefCell<BrowserState>,
     new_tab_uri: String,
     history_uri: String,
     bookmarks_uri: String,
     settings_uri: String,
+    extensions_uri: String,
+}
+
+const FIREFOX_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+const CHROME_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+// Stores sniff the UA to decide which install button to show.
+fn apply_site_user_agent(view: &WebView) {
+    let uri = current_uri(view);
+    let Some(settings) = view.settings() else {
+        return;
+    };
+    if uri.contains("addons.mozilla.org") {
+        settings.set_user_agent(Some(FIREFOX_UA));
+    } else if uri.contains("chromewebstore.google.com") || uri.contains("chrome.google.com/webstore")
+    {
+        settings.set_user_agent(Some(CHROME_UA));
+    } else {
+        settings.set_user_agent(None);
+    }
 }
 
 fn normalize_uri(input: &str) -> Option<String> {
@@ -270,7 +292,7 @@ fn move_tab(app: &Rc<AppState>, source: u32, target: u32) {
 fn update_bookmark_button(app: &AppState) {
     if let Some(tab) = current_tab(app) {
         let uri = current_uri(&tab.web_view);
-        if uri.is_empty() || uri == app.new_tab_uri || uri == app.history_uri || uri == app.bookmarks_uri || uri == app.settings_uri {
+        if uri.is_empty() || uri == app.new_tab_uri || uri == app.history_uri || uri == app.bookmarks_uri || uri == app.settings_uri || uri == app.extensions_uri {
             app.bookmark_button.set_sensitive(false);
             app.bookmark_button.set_icon_name("bookmark-new-symbolic");
             return;
@@ -309,8 +331,8 @@ fn sync_window(app: &AppState, tab: &TabState) {
 
 fn configure_web_view(web_view: &WebView) {
     let settings = Settings::new();
-    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
-    settings.set_enable_webgl(false);
+    settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
+    settings.set_enable_webgl(true);
     settings.set_enable_write_console_messages_to_stdout(true);
     settings.set_enable_developer_extras(true);
     web_view.set_settings(&settings);
@@ -333,6 +355,8 @@ fn update_tab_title(app: &AppState, tab: &TabState) {
         "Bookmarks".to_string()
     } else if uri == app.settings_uri {
         "Settings".to_string()
+    } else if uri == app.extensions_uri {
+        "Extensions".to_string()
     } else if !title.is_empty() {
         title
     } else if !uri.is_empty() {
@@ -415,6 +439,24 @@ fn build_settings_script(state: &BrowserState) -> String {
     )
 }
 
+fn build_extensions_script(app: &AppState) -> String {
+    let extensions = app.extensions.borrow();
+    let items = extensions
+        .names
+        .iter()
+        .zip(extensions.dirs.iter())
+        .map(|(name, dir)| {
+            format!(
+                "{{name:'{}',dir:'{}'}}",
+                js_escape(name),
+                js_escape(&dir.to_string_lossy())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("window.ubarRenderExtensions({{items:[{items}]}});")
+}
+
 fn render_internal_page(app: &Rc<AppState>, tab: &TabState) {
     let uri = current_uri(&tab.web_view);
     let state = app.browser_state.borrow();
@@ -424,6 +466,8 @@ fn render_internal_page(app: &Rc<AppState>, tab: &TabState) {
         evaluate_js(&tab.web_view, &build_bookmarks_script(&state), &app.bookmarks_uri);
     } else if uri == app.settings_uri {
         evaluate_js(&tab.web_view, &build_settings_script(&state), &app.settings_uri);
+    } else if uri == app.extensions_uri {
+        evaluate_js(&tab.web_view, &build_extensions_script(app), &app.extensions_uri);
     }
 }
 
@@ -457,7 +501,11 @@ fn refresh_internal_pages(app: &Rc<AppState>) {
                 .map(|ptr| unsafe { ptr.as_ref().clone() })
         {
             let uri = current_uri(&tab.web_view);
-            if uri == app.history_uri || uri == app.bookmarks_uri || uri == app.settings_uri {
+            if uri == app.history_uri
+                || uri == app.bookmarks_uri
+                || uri == app.settings_uri
+                || uri == app.extensions_uri
+            {
                 render_internal_page(app, &tab);
             }
         }
@@ -700,6 +748,16 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
         return;
     }
 
+    if let Some(name) = message.strip_prefix("delete-extension:") {
+        let decoded = glib::uri_unescape_string(name, None::<&str>).unwrap_or_default();
+        let removed = crate::extensions::uninstall(&decoded, &app.extensions.borrow());
+        if removed {
+            *app.extensions.borrow_mut() = crate::extensions::load();
+            refresh_internal_pages(app);
+        }
+        return;
+    }
+
     if let Some(uri) = message.strip_prefix("save-homepage:") {
         let decoded = glib::uri_unescape_string(uri, None::<&str>).unwrap_or_default();
         app.browser_state.borrow_mut().settings.homepage_uri =
@@ -709,8 +767,61 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
     }
 }
 
+// Injected on the store sites: floating "Install in ubar" button that navigates
+// to the .xpi / .crx file, which the download handler routes to the installer.
+const AMO_HELPER: &str = r#"(function(){
+function addBtn(){
+  var old=document.getElementById('ubar-install');
+  var link=document.querySelector('a[href*="/downloads/file/"]');
+  if(!link){if(old)old.remove();return;}
+  if(old){old.dataset.href=link.href;return;}
+  var b=document.createElement('button');
+  b.id='ubar-install';b.textContent='Install in ubar';b.dataset.href=link.href;
+  b.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:12px 20px;border-radius:999px;border:none;background:#1a73e8;color:#fff;font:600 14px system-ui;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+  b.onclick=function(){location.href=b.dataset.href};
+  document.body.appendChild(b);
+}
+addBtn();
+new MutationObserver(addBtn).observe(document.documentElement,{childList:true,subtree:true});
+})();"#;
+
+const CWS_HELPER: &str = r#"(function(){
+function addBtn(){
+  var old=document.getElementById('ubar-install');
+  var m=location.pathname.match(/\/detail\/[^\/]+\/([a-p]{32})/);
+  if(!m){if(old)old.remove();return;}
+  var url='https://clients2.google.com/service/update2/crx?response=redirect&prodversion=126.0.0.0&acceptformat=crx2,crx3&x=id%3D'+m[1]+'%26uc';
+  if(old){old.dataset.href=url;return;}
+  var b=document.createElement('button');
+  b.id='ubar-install';b.textContent='Install in ubar';b.dataset.href=url;
+  b.style.cssText='position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:12px 20px;border-radius:999px;border:none;background:#1a73e8;color:#fff;font:600 14px system-ui;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+  b.onclick=function(){location.href=b.dataset.href};
+  document.body.appendChild(b);
+}
+addBtn();
+new MutationObserver(addBtn).observe(document.documentElement,{childList:true,subtree:true});
+})();"#;
+
+fn inject_store_helpers(manager: &UserContentManager) {
+    manager.add_script(&UserScript::new(
+        AMO_HELPER,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::End,
+        &["https://addons.mozilla.org/*"],
+        &[],
+    ));
+    manager.add_script(&UserScript::new(
+        CWS_HELPER,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::End,
+        &["https://chromewebstore.google.com/*"],
+        &[],
+    ));
+}
+
 fn inject_extensions(app: &AppState, manager: &UserContentManager) {
-    for script in &app.extensions.scripts {
+    let extensions = app.extensions.borrow();
+    for script in &extensions.scripts {
         let allow: Vec<&str> = script.allowlist.iter().map(String::as_str).collect();
         let time = if script.at_start {
             UserScriptInjectionTime::Start
@@ -726,7 +837,7 @@ fn inject_extensions(app: &AppState, manager: &UserContentManager) {
             &[],
         ));
     }
-    for style in &app.extensions.styles {
+    for style in &extensions.styles {
         let allow: Vec<&str> = style.allowlist.iter().map(String::as_str).collect();
         manager.add_style_sheet(&UserStyleSheet::new(
             &style.source,
@@ -742,6 +853,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let manager = UserContentManager::new();
     let _ = manager.register_script_message_handler("ubar", None::<&str>);
     inject_extensions(app, &manager);
+    inject_store_helpers(&manager);
 
     let web_view: WebView = glib::Object::builder()
         .property("user-content-manager", &manager)
@@ -908,6 +1020,20 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let tab_icon = tab.clone();
     web_view.connect_favicon_notify(move |_| update_tab_favicon(&tab_icon));
 
+    web_view.connect_uri_notify(|view| apply_site_user_agent(view));
+
+    // Non-displayable responses (xpi, crx, binaries) become downloads.
+    web_view.connect_decide_policy(|_, decision, decision_type| {
+        if decision_type == webkit6::PolicyDecisionType::Response
+            && let Some(response) = decision.downcast_ref::<webkit6::ResponsePolicyDecision>()
+            && !response.is_mime_type_supported()
+        {
+            decision.download();
+            return true;
+        }
+        false
+    });
+
     // window.open / target=_blank -> new tab.
     let app_create = app.clone();
     web_view.connect_create(move |_, action| {
@@ -936,7 +1062,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         if event == LoadEvent::Finished {
             let uri = current_uri(view);
             let title = current_title(view);
-            if uri == app_load.history_uri || uri == app_load.bookmarks_uri || uri == app_load.settings_uri {
+            if uri == app_load.history_uri || uri == app_load.bookmarks_uri || uri == app_load.settings_uri || uri == app_load.extensions_uri {
                 render_internal_page(&app_load, &tab_load);
             } else if !uri.is_empty() && uri != app_load.new_tab_uri {
                 app_load.browser_state.borrow_mut().add_history(
@@ -979,11 +1105,13 @@ fn build_menu(app: &Rc<AppState>) {
     let history = Button::with_label("History");
     let bookmarks = Button::with_label("Bookmarks");
     let downloads = Button::with_label("Downloads");
+    let extensions = Button::with_label("Extensions");
     let settings = Button::with_label("Settings");
     menu_box.append(&home);
     menu_box.append(&history);
     menu_box.append(&bookmarks);
     menu_box.append(&downloads);
+    menu_box.append(&extensions);
     menu_box.append(&settings);
 
     let popover = Popover::new();
@@ -1014,6 +1142,11 @@ fn build_menu(app: &Rc<AppState>) {
             &format!("file://{}", dir.to_string_lossy()),
             None::<&gio::AppLaunchContext>,
         );
+    });
+
+    let app_extensions = app.clone();
+    extensions.connect_clicked(move |_| {
+        load_uri_in_current_tab(&app_extensions, &app_extensions.extensions_uri)
     });
 
     let app_settings = app.clone();
@@ -1229,23 +1362,6 @@ pub fn run() {
         if let Some(data_manager) = network_session.website_data_manager() {
             data_manager.set_favicons_enabled(true);
         }
-        network_session.connect_download_started(|_, download| {
-            download.connect_decide_destination(|download, suggested| {
-                let dir = dirs::download_dir()
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
-                let name = if suggested.is_empty() { "download" } else { suggested };
-                let mut path = dir.join(name);
-                let mut counter = 1;
-                while path.exists() {
-                    path = dir.join(format!("{counter}-{name}"));
-                    counter += 1;
-                }
-                download.set_destination(&path.to_string_lossy());
-                true
-            });
-        });
-
         let app = Rc::new(AppState {
             window,
             notebook,
@@ -1261,16 +1377,79 @@ pub fn run() {
             find_bar,
             find_entry,
             network_session,
-            extensions: crate::extensions::load(),
+            extensions: RefCell::new(crate::extensions::load()),
             closed_tabs: RefCell::new(Vec::new()),
             browser_state: RefCell::new(BrowserState::load()),
             new_tab_uri: asset_uri("assets/newtab/index.html"),
             history_uri: asset_uri("assets/pages/history/index.html"),
             bookmarks_uri: asset_uri("assets/pages/bookmarks/index.html"),
             settings_uri: asset_uri("assets/pages/settings/index.html"),
+            extensions_uri: asset_uri("assets/pages/extensions/index.html"),
         });
 
         build_menu(&app);
+
+        // Downloads: .xpi/.crx go to a staging dir and install as extensions,
+        // everything else lands in ~/Downloads.
+        let pending_dir = cache_root.join("pending");
+        let app_download = app.clone();
+        app.network_session.connect_download_started(move |_, download| {
+            let pending = pending_dir.clone();
+            download.connect_decide_destination(move |download, suggested| {
+                let name = if suggested.is_empty() { "download" } else { suggested };
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(".xpi") || lower.ends_with(".crx")
+                    || download
+                        .request()
+                        .and_then(|r| r.uri())
+                        .is_some_and(|u| u.contains("service/update2/crx"))
+                {
+                    let _ = std::fs::create_dir_all(&pending);
+                    let staged = if lower.ends_with(".crx") || lower.ends_with(".xpi") {
+                        pending.join(name)
+                    } else {
+                        pending.join(format!("{name}.crx"))
+                    };
+                    download.set_allow_overwrite(true);
+                    download.set_destination(&staged.to_string_lossy());
+                    return true;
+                }
+
+                let dir = dirs::download_dir()
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let mut path = dir.join(name);
+                let mut counter = 1;
+                while path.exists() {
+                    path = dir.join(format!("{counter}-{name}"));
+                    counter += 1;
+                }
+                download.set_destination(&path.to_string_lossy());
+                true
+            });
+
+            let app_finished = app_download.clone();
+            download.connect_finished(move |download| {
+                let Some(dest) = download.destination() else {
+                    return;
+                };
+                let lower = dest.to_ascii_lowercase();
+                if !lower.ends_with(".xpi") && !lower.ends_with(".crx") {
+                    return;
+                }
+                let path = std::path::PathBuf::from(dest.as_str());
+                match crate::extensions::install_file(&path) {
+                    Ok(name) => {
+                        println!("ubar: installed extension: {name}");
+                        *app_finished.extensions.borrow_mut() = crate::extensions::load();
+                        refresh_internal_pages(&app_finished);
+                        load_uri_in_current_tab(&app_finished, &app_finished.extensions_uri);
+                    }
+                    Err(error) => eprintln!("ubar: extension install failed: {error}"),
+                }
+                let _ = std::fs::remove_file(&path);
+            });
+        });
 
         let app_find_changed = app.clone();
         app.find_entry.connect_changed(move |_| find_search(&app_find_changed));
@@ -1363,6 +1542,7 @@ pub fn run() {
                     || uri == app_bookmark.history_uri
                     || uri == app_bookmark.bookmarks_uri
                     || uri == app_bookmark.settings_uri
+                    || uri == app_bookmark.extensions_uri
                 {
                     return;
                 }

@@ -37,7 +37,14 @@ Assets are copied to `build/linux/assets/` so the executable can load the intern
 
 ## Extensions
 
-Unpacked Firefox-style extensions load from `~/.local/share/ubar/extensions/<name>/` (a folder containing `manifest.json`). Supported: `content_scripts` (js + css, `matches`, `run_at`) with a minimal `browser.*` shim (`storage.local`, `runtime.getURL`/`getManifest`). Background pages, popups, and `webRequest` are not supported.
+Two ways to install:
+
+1. **From the stores**: visit [addons.mozilla.org](https://addons.mozilla.org) or [chromewebstore.google.com](https://chromewebstore.google.com). ubar spoofs the matching browser UA on those sites and shows a floating "Install in ubar" button; clicking it downloads the `.xpi`/`.crx` and installs it automatically. The Extensions page opens when done.
+2. **Manually**: drop an unpacked extension folder (containing `manifest.json`) into `~/.local/share/ubar/extensions/<name>/` and restart.
+
+Manage installed extensions from menu -> Extensions.
+
+Supported: `content_scripts` (js + css, `matches`, `run_at`) with a minimal `browser.*`/`chrome.*` shim (`storage.local`, `runtime.getURL`/`getManifest`). Background pages/service workers, popups, and `webRequest` are not supported -- extensions that rely only on those install but do nothing.
 
 ## Shortcuts
 
