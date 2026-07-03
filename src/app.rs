@@ -652,11 +652,13 @@ fn build_extensions_script(app: &AppState) -> String {
         .names
         .iter()
         .zip(extensions.dirs.iter())
-        .map(|(name, dir)| {
+        .zip(extensions.pages.iter())
+        .map(|((name, dir), page)| {
             format!(
-                "{{name:'{}',dir:'{}'}}",
+                "{{name:'{}',dir:'{}',page:'{}'}}",
                 js_escape(name),
-                js_escape(&dir.to_string_lossy())
+                js_escape(&dir.to_string_lossy()),
+                js_escape(page)
             )
         })
         .collect::<Vec<_>>()
@@ -1426,6 +1428,10 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     close_button.set_has_frame(false);
     close_button.set_focusable(false);
     close_button.set_size_request(22, 22);
+    // Push close to the right edge; without this it left-packs in the fixed-width
+    // actions box, leaving a gap once the audio icon is hidden.
+    close_button.set_hexpand(true);
+    close_button.set_halign(Align::End);
 
     let actions_box = GtkBox::new(Orientation::Horizontal, 8);
     actions_box.set_size_request(TAB_ACTIONS_WIDTH, -1);
@@ -1999,6 +2005,8 @@ pub fn run() {
         let reload_button = Button::from_icon_name("view-refresh-symbolic");
         let address_entry = Entry::new();
         let bookmark_button = Button::from_icon_name("bookmark-new-symbolic");
+        let extensions_button = Button::from_icon_name("application-x-addon-symbolic");
+        extensions_button.set_tooltip_text(Some("Extensions"));
         let new_tab_button = Button::from_icon_name("list-add-symbolic");
         let menu_button = MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
@@ -2057,12 +2065,14 @@ pub fn run() {
         address_entry.set_hexpand(true);
         address_entry.set_height_request(TAB_HEIGHT);
         bookmark_button.set_has_frame(false);
+        extensions_button.set_has_frame(false);
         new_tab_button.set_has_frame(false);
         toolbar.append(&back_button);
         toolbar.append(&forward_button);
         toolbar.append(&reload_button);
         toolbar.append(&address_entry);
         toolbar.append(&bookmark_button);
+        toolbar.append(&extensions_button);
         toolbar.append(&menu_button);
 
         // Find-in-page bar (hidden until Ctrl+F).
@@ -2414,6 +2424,11 @@ pub fn run() {
                 update_bookmark_button(&app_bookmark);
                 refresh_internal_pages(&app_bookmark);
             }
+        });
+
+        let app_ext_button = app.clone();
+        extensions_button.connect_clicked(move |_| {
+            load_uri_in_current_tab(&app_ext_button, &app_ext_button.extensions_uri)
         });
 
         let app_new = app.clone();

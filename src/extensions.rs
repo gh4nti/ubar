@@ -14,12 +14,32 @@ struct ContentScript {
     run_at: String,
 }
 
+#[derive(Deserialize, Default)]
+struct ActionDef {
+    #[serde(default)]
+    default_popup: String,
+}
+
+#[derive(Deserialize, Default)]
+struct OptionsUi {
+    #[serde(default)]
+    page: String,
+}
+
 #[derive(Deserialize)]
 struct Manifest {
     #[serde(default)]
     name: String,
     #[serde(default)]
     content_scripts: Vec<ContentScript>,
+    // The page a click on the extension should open: MV3 action popup, MV2
+    // browser_action popup, or the options page — whichever it declares.
+    #[serde(default)]
+    action: ActionDef,
+    #[serde(default)]
+    browser_action: ActionDef,
+    #[serde(default)]
+    options_ui: OptionsUi,
 }
 
 pub struct ExtScript {
@@ -37,6 +57,8 @@ pub struct ExtStyle {
 pub struct Extensions {
     pub names: Vec<String>,
     pub dirs: Vec<PathBuf>,
+    // file:// uri of each extension's popup/options page, "" if it has none.
+    pub pages: Vec<String>,
     pub scripts: Vec<ExtScript>,
     pub styles: Vec<ExtStyle>,
 }
@@ -216,8 +238,19 @@ fn load_one(dir: &Path, out: &mut Extensions) -> Option<()> {
         }
     }
 
+    let page = [
+        &manifest.action.default_popup,
+        &manifest.browser_action.default_popup,
+        &manifest.options_ui.page,
+    ]
+    .into_iter()
+    .find(|p| !p.is_empty())
+    .map(|p| format!("{base}{}", p.trim_start_matches('/')))
+    .unwrap_or_default();
+
     out.names.push(if manifest.name.is_empty() { id } else { manifest.name });
     out.dirs.push(dir.to_path_buf());
+    out.pages.push(page);
     Some(())
 }
 

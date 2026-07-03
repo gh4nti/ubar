@@ -12,6 +12,11 @@ function entryRow(item) {
   const title = document.createElement("div");
   title.className = "row-link";
   title.textContent = item.name;
+  if (item.page) {
+    title.style.cursor = "pointer";
+    title.title = "Open extension";
+    title.addEventListener("click", () => post(`open:${encodeURIComponent(item.page)}`));
+  }
 
   const meta = document.createElement("div");
   meta.className = "row-meta";
