@@ -18,7 +18,7 @@ use webkit6::{LoadEvent, Settings, UserContentManager, WebView};
 
 const APP_ID: &str = "dev.ghanti.ubar";
 const TAB_WIDTH: i32 = 220;
-const TAB_HEIGHT: i32 = 34;
+const TAB_HEIGHT: i32 = 32;
 const TAB_ANIMATION_MS: u32 = 140;
 
 #[derive(Clone)]
@@ -434,21 +434,26 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     configure_web_view(&web_view);
 
     let favicon = Image::from_icon_name("globe-symbolic");
+    favicon.set_pixel_size(14);
+    favicon.set_valign(Align::Center);
     let title = Label::new(Some("New Tab"));
     title.add_css_class("ubar-tab-title");
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     title.set_max_width_chars(32);
     title.set_xalign(0.0);
     title.set_hexpand(true);
+    title.set_valign(Align::Center);
 
     let close_button = Button::from_icon_name("window-close-symbolic");
+    close_button.add_css_class("ubar-tab-close");
     close_button.set_has_frame(false);
     close_button.set_focusable(false);
+    close_button.set_size_request(22, 22);
 
     let tab_box = GtkBox::new(Orientation::Horizontal, 8);
     tab_box.add_css_class("ubar-tab");
-    tab_box.set_margin_top(2);
-    tab_box.set_margin_bottom(2);
+    tab_box.set_margin_top(0);
+    tab_box.set_margin_bottom(0);
     tab_box.set_margin_start(6);
     tab_box.set_margin_end(6);
     tab_box.set_halign(Align::Start);
@@ -651,7 +656,8 @@ pub fn run() {
         css.load_from_data(
             "
             .ubar-tab {
-                padding: 2px 8px;
+                min-height: 0;
+                padding: 0 8px;
                 border-radius: 11px;
                 background: alpha(currentColor, 0.03);
                 box-shadow: inset 0 0 0 1px alpha(currentColor, 0.06);
@@ -669,6 +675,12 @@ pub fn run() {
 
             .ubar-tab-active .ubar-tab-title {
                 font-weight: 700;
+            }
+
+            .ubar-tab-close {
+                min-width: 22px;
+                min-height: 22px;
+                padding: 0;
             }
             ",
         );
@@ -723,8 +735,8 @@ pub fn run() {
         tabs_row.set_hexpand(true);
         tabs_row.set_margin_start(6);
         tabs_row.set_margin_end(6);
-        tabs_row.set_margin_top(2);
-        tabs_row.set_margin_bottom(2);
+        tabs_row.set_margin_top(0);
+        tabs_row.set_margin_bottom(0);
         tabs_row.append(&tab_scroller);
 
         let end_controls = GtkBox::new(Orientation::Horizontal, 6);
