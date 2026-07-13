@@ -299,6 +299,25 @@ impl App {
         match command {
             "navigate" => self.navigate(value["value"].as_str().unwrap_or("")),
             "ready" => self.sync_toolbar(),
+            "window-drag" => {
+                if let Some(window) = &self.window {
+                    let _ = window.drag_window();
+                }
+            }
+            "window-minimize" => {
+                if let Some(window) = &self.window {
+                    window.set_minimized(true);
+                }
+            }
+            "window-maximize" => {
+                if let Some(window) = &self.window {
+                    window.set_maximized(!window.is_maximized());
+                }
+            }
+            "window-close" => {
+                self.save_session();
+                let _ = self.proxy.send_event(UserEvent::Exit);
+            }
             "back" => {
                 let _ = self.tabs[target].webview.evaluate_script("history.back()");
             }
@@ -377,6 +396,7 @@ impl ApplicationHandler<UserEvent> for App {
             .create_window(
                 Window::default_attributes()
                     .with_title("ubar")
+                    .with_decorations(false)
                     .with_inner_size(PhysicalSize::new(1280, 800)),
             )
             .expect("create ubar window");

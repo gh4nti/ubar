@@ -2,7 +2,12 @@
 * { box-sizing: border-box; }
 body { margin: 0; overflow: hidden; background: #202124; color: #eee; }
 #tabs, #nav { display: flex; align-items: center; gap: 4px; padding: 4px 6px; }
-#tabs { height: 36px; padding-bottom: 0; overflow-x: auto; }
+#tabs { height: 36px; padding: 0 0 0 6px; }
+#tab-strip { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; }
+#drag-region { align-self: stretch; flex: 1 1 32px; min-width: 32px; }
+#window-controls { align-self: stretch; display: flex; flex: 0 0 auto; }
+#window-controls button { width: 46px; height: 36px; border-radius: 0; }
+#window-controls .window-close:hover { background: #c42b1c; color: #fff; }
 #nav { height: 46px; }
 button, input { border: 0; border-radius: 6px; font: inherit; }
 button { min-width: 32px; height: 30px; background: transparent; color: inherit; cursor: pointer; }

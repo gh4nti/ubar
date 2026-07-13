@@ -1,6 +1,7 @@
 const send = (message) => window.ipc.postMessage(JSON.stringify(message));
-const tabs = document.getElementById('tabs');
+const tabs = document.getElementById('tab-strip');
 const add = document.getElementById('new');
+const dragRegion = document.getElementById('drag-region');
 const address = document.getElementById('address');
 const bookmark = document.getElementById('bookmark');
 
@@ -12,6 +13,10 @@ bookmark.addEventListener('click', () => send({cmd: 'bookmark'}));
 address.addEventListener('keydown', event => {
   if (event.key === 'Enter') send({cmd: 'navigate', value: address.value});
 });
+dragRegion.addEventListener('pointerdown', event => {
+  if (event.button === 0) send({cmd: 'window-drag'});
+});
+dragRegion.addEventListener('dblclick', () => send({cmd: 'window-maximize'}));
 window.addEventListener('keydown', event => {
   if (!event.ctrlKey) return;
   const commands = {l: () => window.ubarFocusAddress(), t: () => send({cmd: 'new-tab'})};

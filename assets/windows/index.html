@@ -6,7 +6,15 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="tabs"><button id="new" title="New tab">+</button></div>
+  <div id="tabs">
+    <div id="tab-strip"><button id="new" title="New tab">+</button></div>
+    <div id="drag-region"></div>
+    <div id="window-controls">
+      <button data-command="window-minimize" title="Minimize">&#x2212;</button>
+      <button data-command="window-maximize" title="Maximize">&#x25a1;</button>
+      <button class="window-close" data-command="window-close" title="Close">&#xd7;</button>
+    </div>
+  </div>
   <div id="nav">
     <button data-command="back" title="Back">&#x2190;</button>
     <button data-command="forward" title="Forward">&#x2192;</button>
