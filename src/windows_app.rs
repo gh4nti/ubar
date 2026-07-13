@@ -24,6 +24,7 @@ enum UserEvent {
     Content(u64, String),
     Loaded(u64, String),
     Title(u64, String),
+    Exit,
 }
 
 struct Tab {
@@ -229,8 +230,8 @@ impl App {
         };
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            self.active = 0;
-            self.add_tab(self.new_tab_uri.clone());
+            self.save_session();
+            let _ = self.proxy.send_event(UserEvent::Exit);
         } else {
             self.active = self.active.min(self.tabs.len() - 1);
             let _ = self.tabs[self.active].webview.set_visible(true);
@@ -423,8 +424,9 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::Exit => event_loop.exit(),
             UserEvent::Toolbar(message) => self.handle_command(None, &message),
             UserEvent::Content(id, message) => self.handle_command(Some(id), &message),
             UserEvent::Loaded(id, uri) => {
