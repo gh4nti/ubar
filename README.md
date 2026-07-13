@@ -1,8 +1,8 @@
 # ubar
 
-Tiny browser shell in Rust with GTK4 and WebKitGTK.
+Tiny browser shell in Rust. Uses GTK4/WebKitGTK on Linux and Edge WebView2 on Windows.
 
-## Requirements
+## Linux requirements
 
 - `rust`
 - `cargo`
@@ -34,6 +34,19 @@ make
 ```
 
 Assets are copied to `build/linux/assets/` so the executable can load the internal pages beside itself.
+
+## Windows build
+
+Rust, Microsoft C++ Build Tools with the Windows SDK, and the Microsoft Edge WebView2 Runtime are required. Open **Developer PowerShell for VS 2022**, then run:
+
+```powershell
+cargo build
+cargo test
+.\target\debug\ubar.exe
+```
+
+Cargo copies assets beside `ubar.exe`. Windows uses a native WebView2 frontend; GTK and WebKitGTK are not needed.
+Tabs, navigation, session restore, history, bookmarks, downloads, and developer tools work on Windows. GTK-specific extension injection, custom password vault prompts, and advanced permission controls remain Linux-only.
 
 ## Extensions
 

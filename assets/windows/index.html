@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="tabs"><button id="new" title="New tab">+</button></div>
+  <div id="nav">
+    <button data-command="back" title="Back">&#x2190;</button>
+    <button data-command="forward" title="Forward">&#x2192;</button>
+    <button data-command="reload" title="Reload">&#x21bb;</button>
+    <button data-command="home" title="Home">&#x2302;</button>
+    <input id="address" aria-label="Address" autocomplete="off" spellcheck="false">
+    <button id="bookmark" title="Bookmark">&#x2606;</button>
+    <button data-command="devtools" title="Developer tools">&#x22ef;</button>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

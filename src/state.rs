@@ -148,6 +148,7 @@ impl BrowserState {
         self.save();
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.save();
@@ -177,6 +178,7 @@ impl BrowserState {
     }
 
     // "ask" unless a site rule or default says otherwise.
+    #[cfg(not(target_os = "windows"))]
     pub fn permission_for(&self, origin: &str, key: &str) -> String {
         self.site_permissions
             .get(origin)
@@ -186,6 +188,7 @@ impl BrowserState {
             .unwrap_or_else(|| "ask".into())
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn set_site_permission(&mut self, origin: &str, key: &str, value: &str) {
         self.site_permissions
             .entry(origin.to_string())
@@ -218,6 +221,7 @@ impl BrowserState {
         self.downloads.iter_mut().find(|entry| entry.id == id)
     }
 
+    #[cfg(not(target_os = "windows"))]
     pub fn remove_bookmark(&mut self, uri: &str) -> bool {
         if let Some(index) = self.bookmarks.iter().position(|entry| entry.uri == uri) {
             self.bookmarks.remove(index);
@@ -228,6 +232,7 @@ impl BrowserState {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 pub fn asset_uri(relative: &str) -> String {
     let exe_dir = std::env::current_exe()
         .ok()
