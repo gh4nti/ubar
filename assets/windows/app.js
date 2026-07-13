@@ -4,12 +4,41 @@ const add = document.getElementById('new');
 const dragRegion = document.getElementById('drag-region');
 const address = document.getElementById('address');
 const bookmark = document.getElementById('bookmark');
+const more = document.getElementById('more');
+const menu = document.getElementById('app-menu');
+const hideMenu = () => {
+  if (menu.hidden) return;
+  menu.hidden = true;
+  more.classList.remove('active');
+  send({cmd: 'menu-close'});
+};
+const toggleMenu = () => {
+  menu.hidden = !menu.hidden;
+  more.classList.toggle('active', !menu.hidden);
+  send({cmd: menu.hidden ? 'menu-close' : 'menu-open'});
+};
+const choose = (message) => {
+  send(message);
+  hideMenu();
+};
 
-document.querySelectorAll('[data-command]').forEach(button => {
+document.querySelectorAll('#nav [data-command], #window-controls [data-command]').forEach(button => {
   button.addEventListener('click', () => send({cmd: button.dataset.command}));
 });
 add.addEventListener('click', () => send({cmd: 'new-tab'}));
 bookmark.addEventListener('click', () => send({cmd: 'bookmark'}));
+more.addEventListener('click', event => {
+  event.stopPropagation();
+  toggleMenu();
+});
+menu.addEventListener('click', event => event.stopPropagation());
+menu.querySelectorAll('[data-page]').forEach(button => {
+  button.addEventListener('click', () => choose({cmd: 'open-page', value: button.dataset.page}));
+});
+menu.querySelectorAll('[data-command]').forEach(button => {
+  button.addEventListener('click', () => choose({cmd: button.dataset.command}));
+});
+document.addEventListener('click', hideMenu);
 address.addEventListener('keydown', event => {
   if (event.key === 'Enter') send({cmd: 'navigate', value: address.value});
 });
@@ -18,6 +47,10 @@ dragRegion.addEventListener('pointerdown', event => {
 });
 dragRegion.addEventListener('dblclick', () => send({cmd: 'window-maximize'}));
 window.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    hideMenu();
+    return;
+  }
   if (!event.ctrlKey) return;
   const commands = {l: () => window.ubarFocusAddress(), t: () => send({cmd: 'new-tab'})};
   const command = commands[event.key.toLowerCase()];
@@ -36,11 +69,18 @@ window.ubarRender = (items, uri, bookmarked) => {
   tabs.querySelectorAll('.tab').forEach(tab => tab.remove());
   for (const item of items) {
     const tab = document.createElement('button');
-    tab.className = `tab${item.active ? ' active' : ''}`;
+    tab.className = `tab${item.active ? ' active' : ''}${item.incognito ? ' incognito' : ''}`;
     tab.innerHTML = '<span class="title"></span><span class="close">&#xd7;</span>';
-    tab.querySelector('.title').textContent = item.title || 'New Tab';
-    tab.title = item.title || 'New Tab';
+    const title = `${item.incognito ? 'Private - ' : ''}${item.title || 'New Tab'}`;
+    tab.querySelector('.title').textContent = title;
+    tab.title = title;
     tab.addEventListener('click', () => send({cmd: 'select-tab', id: item.id}));
+    tab.addEventListener('auxclick', event => {
+      if (event.button === 1) {
+        event.preventDefault();
+        send({cmd: 'close-tab', id: item.id});
+      }
+    });
     tab.querySelector('.close').addEventListener('click', event => {
       event.stopPropagation();
       send({cmd: 'close-tab', id: item.id});

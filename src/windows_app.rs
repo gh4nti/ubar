@@ -10,13 +10,23 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
-use wry::dpi::{PhysicalPosition, PhysicalSize};
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos},
+};
+use wry::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
-use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder};
+use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder, WebViewExtWindows};
 
 const TOOLBAR_HEIGHT: f64 = 82.0;
+const MENU_OVERLAY_HEIGHT: f64 = 360.0;
 const NEW_TAB_URI: &str = "ubar://localhost/newtab/index.html";
 const TOOLBAR_URI: &str = "ubar://localhost/windows/index.html";
+const HISTORY_URI: &str = "ubar://localhost/pages/history/index.html";
+const BOOKMARKS_URI: &str = "ubar://localhost/pages/bookmarks/index.html";
+const DOWNLOADS_URI: &str = "ubar://localhost/pages/downloads/index.html";
+const EXTENSIONS_URI: &str = "ubar://localhost/pages/extensions/index.html";
+const SETTINGS_URI: &str = "ubar://localhost/pages/settings/index.html";
 
 #[derive(Debug)]
 enum UserEvent {
@@ -32,6 +42,7 @@ struct Tab {
     webview: WebView,
     uri: String,
     title: String,
+    incognito: bool,
 }
 
 struct App {
@@ -41,6 +52,7 @@ struct App {
     tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
+    menu_open: bool,
     state: Rc<RefCell<BrowserState>>,
     new_tab_uri: String,
 }
@@ -89,7 +101,36 @@ window.addEventListener('keydown', event => {
     window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key}));
   }
 });
+window.webkit = window.webkit || {};
+window.webkit.messageHandlers = window.webkit.messageHandlers || {};
+window.webkit.messageHandlers.ubar = {
+  postMessage(message) {
+    window.ipc.postMessage(JSON.stringify({cmd:'internal', message:String(message)}));
+  }
+};
 "#
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (
+                (bytes[index + 1] as char).to_digit(16),
+                (bytes[index + 2] as char).to_digit(16),
+            )
+        {
+            output.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 fn asset_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
@@ -125,22 +166,47 @@ fn asset_response(request: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
         .unwrap()
 }
 
-fn toolbar_bounds(window: &Window) -> Rect {
+fn toolbar_bounds(window: &Window, menu_open: bool) -> Rect {
     let scale = window.scale_factor();
-    let size = window.inner_size();
+    let size = window.inner_size().to_logical::<f64>(scale);
     Rect {
-        position: PhysicalPosition::new(0, 0).into(),
-        size: PhysicalSize::new(size.width, (TOOLBAR_HEIGHT * scale) as u32).into(),
+        position: LogicalPosition::new(0.0, 0.0).into(),
+        size: LogicalSize::new(
+            size.width,
+            if menu_open {
+                TOOLBAR_HEIGHT + MENU_OVERLAY_HEIGHT
+            } else {
+                TOOLBAR_HEIGHT
+            },
+        )
+        .into(),
     }
 }
 
 fn content_bounds(window: &Window) -> Rect {
     let scale = window.scale_factor();
-    let size = window.inner_size();
-    let top = (TOOLBAR_HEIGHT * scale) as u32;
+    let size = window.inner_size().to_logical::<f64>(scale);
     Rect {
-        position: PhysicalPosition::new(0, top as i32).into(),
-        size: PhysicalSize::new(size.width, size.height.saturating_sub(top)).into(),
+        position: LogicalPosition::new(0.0, TOOLBAR_HEIGHT).into(),
+        size: LogicalSize::new(size.width, (size.height - TOOLBAR_HEIGHT).max(0.0)).into(),
+    }
+}
+
+fn raise_webview(webview: &WebView) {
+    let controller = webview.controller();
+    let mut hwnd = HWND::default();
+    unsafe {
+        if controller.ParentWindow(&mut hwnd).is_ok() {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
     }
 }
 
@@ -150,6 +216,7 @@ fn make_tab(
     state: &Rc<RefCell<BrowserState>>,
     id: u64,
     uri: &str,
+    incognito: bool,
 ) -> wry::Result<Tab> {
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
@@ -160,6 +227,7 @@ fn make_tab(
         .with_url(uri)
         .with_bounds(content_bounds(window))
         .with_visible(false)
+        .with_incognito(incognito)
         .with_clipboard(true)
         .with_devtools(true)
         .with_initialization_script(content_script())
@@ -199,17 +267,22 @@ fn make_tab(
         webview,
         uri: uri.into(),
         title: "New Tab".into(),
+        incognito,
     })
 }
 
 impl App {
     fn add_tab(&mut self, uri: String) {
+        self.add_tab_with_mode(uri, false);
+    }
+
+    fn add_tab_with_mode(&mut self, uri: String, incognito: bool) {
         let Some(window) = self.window.as_ref() else {
             return;
         };
         let id = self.next_id;
         self.next_id += 1;
-        match make_tab(window, &self.proxy, &self.state, id, &uri) {
+        match make_tab(window, &self.proxy, &self.state, id, &uri, incognito) {
             Ok(tab) => {
                 if let Some(active) = self.tabs.get(self.active) {
                     let _ = active.webview.set_visible(false);
@@ -262,9 +335,126 @@ impl App {
         }
     }
 
+    fn open_internal_page(&mut self, uri: &str) {
+        self.add_tab(uri.to_string());
+    }
+
     fn toolbar_eval(&self, script: &str) {
         if let Some(toolbar) = &self.toolbar {
             let _ = toolbar.evaluate_script(script);
+        }
+    }
+
+    fn set_menu_open(&mut self, open: bool) {
+        self.menu_open = open;
+        if let (Some(window), Some(toolbar)) = (&self.window, &self.toolbar) {
+            let _ = toolbar.set_bounds(toolbar_bounds(window, self.menu_open));
+            raise_webview(toolbar);
+        }
+    }
+
+    fn render_internal(&self, id: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        let state = self.state.borrow();
+        let script = if tab.uri.contains("/pages/history/") {
+            let items = state
+                .history
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "title": item.title,
+                        "uri": item.uri,
+                        "time": chrono::DateTime::<Utc>::from_timestamp(item.timestamp, 0)
+                            .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_default()
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "window.ubarRenderHistory?.({});",
+                serde_json::json!({"items": items})
+            )
+        } else if tab.uri.contains("/pages/bookmarks/") {
+            let items = state
+                .bookmarks
+                .iter()
+                .map(|item| serde_json::json!({"title": item.title, "uri": item.uri}))
+                .collect::<Vec<_>>();
+            format!(
+                "window.ubarRenderBookmarks?.({});",
+                serde_json::json!({"items": items})
+            )
+        } else if tab.uri.contains("/pages/downloads/") {
+            let items = state
+                .downloads
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "id": item.id,
+                        "uri": item.uri,
+                        "filename": item.filename,
+                        "received": item.received,
+                        "total": item.total,
+                        "status": if item.status == "finished" { "done" } else { &item.status }
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "window.ubarRenderDownloads?.({});",
+                serde_json::json!({"items": items})
+            )
+        } else if tab.uri.contains("/pages/extensions/") {
+            "window.ubarRenderExtensions?.({items:[]});".into()
+        } else if tab.uri.contains("/pages/settings/") {
+            format!(
+                "window.ubarRenderSettings?.({});",
+                serde_json::json!({
+                    "homepageUri": state.settings.homepage_uri,
+                    "historyCount": state.history.len(),
+                    "bookmarkCount": state.bookmarks.len(),
+                    "searchEngine": state.settings.search_engine,
+                    "downloadDir": state.settings.download_dir,
+                    "theme": state.settings.theme,
+                    "defaultZoom": state.settings.default_zoom,
+                    "fontSize": state.settings.font_size,
+                    "defaults": {},
+                    "sites": [],
+                    "passwords": []
+                })
+            )
+        } else {
+            return;
+        };
+        let _ = tab.webview.evaluate_script(&script);
+    }
+
+    fn handle_internal(&mut self, target: usize, message: &str) {
+        let Some(tab) = self.tabs.get(target) else {
+            return;
+        };
+        if !tab.uri.contains("ubar.localhost") && !tab.uri.starts_with("ubar:") {
+            return;
+        }
+        if let Some(uri) = message.strip_prefix("open:") {
+            let uri = percent_decode(uri);
+            let _ = tab.webview.load_url(&uri);
+        } else if message == "clear-history" {
+            self.state.borrow_mut().clear_history();
+            self.render_internal(tab.id);
+        } else if let Some(uri) = message.strip_prefix("delete-bookmark:") {
+            self.state
+                .borrow_mut()
+                .remove_bookmark(&percent_decode(uri));
+            self.render_internal(tab.id);
+            self.sync_toolbar();
+        } else if message == "downloads-clear" {
+            let mut state = self.state.borrow_mut();
+            state.downloads.retain(|item| item.status == "active");
+            state.save();
+            drop(state);
+            self.render_internal(tab.id);
         }
     }
 
@@ -272,7 +462,12 @@ impl App {
         let tabs = self
             .tabs
             .iter()
-            .map(|tab| serde_json::json!({"id":tab.id,"title":tab.title,"active":tab.id == self.tabs[self.active].id}))
+            .map(|tab| serde_json::json!({
+                "id": tab.id,
+                "title": tab.title,
+                "active": tab.id == self.tabs[self.active].id,
+                "incognito": tab.incognito
+            }))
             .collect::<Vec<_>>();
         let uri = self
             .tabs
@@ -299,6 +494,47 @@ impl App {
         match command {
             "navigate" => self.navigate(value["value"].as_str().unwrap_or("")),
             "ready" => self.sync_toolbar(),
+            "menu-open" => self.set_menu_open(true),
+            "menu-close" => self.set_menu_open(false),
+            "open-page" => {
+                let uri = match value["value"].as_str().unwrap_or("") {
+                    "home" => self.new_tab_uri.clone(),
+                    "history" => HISTORY_URI.to_string(),
+                    "bookmarks" => BOOKMARKS_URI.to_string(),
+                    "downloads" => DOWNLOADS_URI.to_string(),
+                    "extensions" => EXTENSIONS_URI.to_string(),
+                    "settings" => SETTINGS_URI.to_string(),
+                    _ => return,
+                };
+                self.open_internal_page(&uri);
+            }
+            "incognito" => self.add_tab_with_mode(self.new_tab_uri.clone(), true),
+            "reading-mode" => {
+                let _ = self.tabs[target].webview.evaluate_script(
+                    r#"(() => {
+const id='ubar-reader-style';
+const old=document.getElementById(id);
+if(old){old.remove();return}
+const style=document.createElement('style');style.id=id;
+style.textContent='body{max-width:760px!important;margin:auto!important;padding:32px!important;font:18px/1.7 Georgia,serif!important} nav,aside,header,footer,[role=banner],[role=navigation]{display:none!important}';
+document.documentElement.append(style);
+})()"#,
+                );
+            }
+            "task-manager" => {
+                let lines = self
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| format!("{}. {}", index + 1, tab.title))
+                    .collect::<Vec<_>>()
+                    .join("\\n");
+                self.toolbar_eval(&format!(
+                    "alert({})",
+                    serde_json::to_string(&lines).unwrap()
+                ));
+            }
+            "internal" => self.handle_internal(target, value["message"].as_str().unwrap_or("")),
             "window-drag" => {
                 if let Some(window) = &self.window {
                     let _ = window.drag_window();
@@ -403,8 +639,12 @@ impl ApplicationHandler<UserEvent> for App {
         let proxy = self.proxy.clone();
         let toolbar = WebViewBuilder::new()
             .with_custom_protocol("ubar".into(), |_, request| asset_response(request))
+            .with_initialization_script(
+                "if(!window.ipc){window.ipc={postMessage:function(m){window.chrome.webview.postMessage(m);}};}",
+            )
+            .with_transparent(true)
             .with_url(TOOLBAR_URI)
-            .with_bounds(toolbar_bounds(&window))
+            .with_bounds(toolbar_bounds(&window, self.menu_open))
             .with_ipc_handler(move |request| {
                 let _ = proxy.send_event(UserEvent::Toolbar(request.body().clone()));
             })
@@ -412,6 +652,9 @@ impl ApplicationHandler<UserEvent> for App {
             .expect("create ubar toolbar");
         self.window = Some(window);
         self.toolbar = Some(toolbar);
+        if let Some(toolbar) = &self.toolbar {
+            raise_webview(toolbar);
+        }
 
         let saved = self.state.borrow().open_tabs.clone();
         let initial = if saved.is_empty() {
@@ -422,6 +665,7 @@ impl ApplicationHandler<UserEvent> for App {
         for uri in initial {
             self.add_tab(uri);
         }
+
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -433,7 +677,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(window) = &self.window {
                     if let Some(toolbar) = &self.toolbar {
-                        let _ = toolbar.set_bounds(toolbar_bounds(window));
+                        let _ = toolbar.set_bounds(toolbar_bounds(window, self.menu_open));
+                        raise_webview(toolbar);
                     }
                     for tab in &self.tabs {
                         let _ = tab.webview.set_bounds(content_bounds(window));
@@ -460,6 +705,7 @@ impl ApplicationHandler<UserEvent> for App {
                         );
                     }
                 }
+                self.render_internal(id);
                 self.sync_toolbar();
             }
             UserEvent::Title(id, title) => {
@@ -489,6 +735,7 @@ pub fn run() {
         tabs: Vec::new(),
         active: 0,
         next_id: 1,
+        menu_open: false,
         state: Rc::new(RefCell::new(BrowserState::load())),
         new_tab_uri: NEW_TAB_URI.into(),
     };
@@ -508,6 +755,10 @@ mod tests {
         assert_eq!(
             normalize_uri("two words", "google").unwrap(),
             "https://www.google.com/search?q=two+words"
+        );
+        assert_eq!(
+            percent_decode("https%3A%2F%2Fexample.com%2Fa%20b"),
+            "https://example.com/a b"
         );
     }
 }

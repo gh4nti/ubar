@@ -148,7 +148,6 @@ impl BrowserState {
         self.save();
     }
 
-    #[cfg(not(target_os = "windows"))]
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.save();
@@ -221,7 +220,6 @@ impl BrowserState {
         self.downloads.iter_mut().find(|entry| entry.id == id)
     }
 
-    #[cfg(not(target_os = "windows"))]
     pub fn remove_bookmark(&mut self, uri: &str) -> bool {
         if let Some(index) = self.bookmarks.iter().position(|entry| entry.uri == uri) {
             self.bookmarks.remove(index);

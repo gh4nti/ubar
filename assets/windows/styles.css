@@ -1,8 +1,9 @@
 :root { color-scheme: light dark; font: 13px "Segoe UI", sans-serif; }
 * { box-sizing: border-box; }
-body { margin: 0; overflow: hidden; background: #202124; color: #eee; }
+body { position: relative; margin: 0; overflow: hidden; background: transparent; color: #eee; }
 #tabs, #nav { display: flex; align-items: center; gap: 4px; padding: 4px 6px; }
-#tabs { height: 36px; padding: 0 0 0 6px; }
+#tabs { height: 36px; padding: 0 0 0 6px; background: #202124; }
+#nav { background: #202124; }
 #tab-strip { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; }
 #drag-region { align-self: stretch; flex: 1 1 32px; min-width: 32px; }
 #window-controls { align-self: stretch; display: flex; flex: 0 0 auto; }
@@ -11,17 +12,44 @@ body { margin: 0; overflow: hidden; background: #202124; color: #eee; }
 #nav { height: 46px; }
 button, input { border: 0; border-radius: 6px; font: inherit; }
 button { min-width: 32px; height: 30px; background: transparent; color: inherit; cursor: pointer; }
-button:hover { background: #ffffff18; }
+button:hover, button.active { background: #ffffff18; }
 .tab { display: flex; align-items: center; min-width: 90px; max-width: 220px; height: 30px; padding-left: 10px; background: #303134; }
 .tab.active { background: #4a4b4d; }
+.tab.incognito { color: #d7b8ff; }
 .tab .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
 .tab .close { min-width: 24px; width: 24px; height: 24px; }
 #new { flex: 0 0 auto; }
 #address { flex: 1; height: 34px; padding: 0 12px; background: #303134; color: inherit; outline: none; }
 #address:focus { box-shadow: 0 0 0 2px #8ab4f8; }
 #bookmark.active { color: #fbbc04; }
+#app-menu {
+  position: absolute;
+  top: 78px;
+  right: 6px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 260px;
+  padding: 6px;
+  border: 1px solid #ffffff22;
+  border-radius: 8px;
+  background: #292a2d;
+  box-shadow: 0 8px 24px #0008;
+}
+#app-menu[hidden] { display: none; }
+#app-menu button {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  padding: 0 12px;
+  text-align: left;
+  white-space: nowrap;
+}
 @media (prefers-color-scheme: light) {
-  body { background: #f1f3f4; color: #202124; }
+  body { color: #202124; }
+  #tabs, #nav { background: #f1f3f4; }
   .tab, #address { background: #fff; }
   .tab.active { background: #dfe1e5; }
+  #app-menu { background: #fff; border-color: #00000020; box-shadow: 0 8px 24px #0003; }
 }
