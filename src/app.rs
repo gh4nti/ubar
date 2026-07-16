@@ -89,34 +89,14 @@ fn origin_of(uri: &str) -> String {
     format!("{}{}", &uri[..scheme_end + 3], &rest[..host_end])
 }
 
-#[cfg(target_os = "macos")]
-const FIREFOX_UA: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0";
-#[cfg(target_os = "macos")]
-const CHROME_UA: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
-#[cfg(not(target_os = "macos"))]
-const FIREFOX_UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
-#[cfg(not(target_os = "macos"))]
-const CHROME_UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
-
 // Stores sniff the UA to decide which install button to show.
-fn apply_site_user_agent(view: &WebView) {
-    let uri = current_uri(view);
+fn apply_site_user_agent(view: &WebView, uri: &str) {
     // WidgetExt::settings vs WebViewExt::settings are both in scope (E0034).
     let Some(settings) = webkit6::prelude::WebViewExt::settings(view) else {
         return;
     };
-    if uri.contains("addons.mozilla.org") {
-        settings.set_user_agent(Some(FIREFOX_UA));
-    } else if uri.contains("chromewebstore.google.com") || uri.contains("chrome.google.com/webstore")
-    {
-        settings.set_user_agent(Some(CHROME_UA));
-    } else {
-        settings.set_user_agent(None);
-    }
+    let user_agent = crate::store_identity::for_uri(uri).map(crate::store_identity::user_agent);
+    settings.set_user_agent(user_agent);
 }
 
 fn search_uri(engine: &str, query: &str) -> String {
@@ -129,53 +109,19 @@ fn search_uri(engine: &str, query: &str) -> String {
     }
 }
 
-// Total physical RAM in MB, cross-platform. 0 if it can't be determined.
-fn total_ram_mb() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
-                        return kb / 1024;
-                    }
-                }
-            }
-        }
-        0
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-            .ok()
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .map(|bytes| bytes / (1024 * 1024))
-            .unwrap_or(0)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        0
-    }
-}
-
 // Tune WebKit memory use to the host. Must run before any web process spawns.
-// Beefy systems keep WebKit's own defaults — no artificial cap.
 fn tune_memory_for_host() {
-    let ram = total_ram_mb();
-    if ram == 0 || ram > 2048 {
-        return;
-    }
-
-    let (limit, cache) = if ram <= 768 {
-        (256, CacheModel::DocumentViewer)
-    } else if ram <= 1536 {
-        (512, CacheModel::DocumentBrowser)
+    const MIB: u64 = 1024 * 1024;
+    let policy = crate::memory_policy::MemoryPolicy::detect();
+    let cache = if policy.constrained {
+        CacheModel::DocumentViewer
+    } else if policy.physical_bytes <= 2 * 1024 * MIB {
+        CacheModel::DocumentBrowser
     } else {
-        (896, CacheModel::DocumentBrowser)
+        CacheModel::WebBrowser
     };
+    let per_renderer = (policy.elastic_ceiling_bytes / u64::from(policy.renderer_limit)) / MIB;
+    let limit = per_renderer.clamp(256, 4096) as u32;
 
     if let Some(context) = WebContext::default() {
         context.set_cache_model(cache);
@@ -186,7 +132,7 @@ fn tune_memory_for_host() {
     settings.set_memory_limit(limit);
     settings.set_conservative_threshold(0.33);
     settings.set_strict_threshold(0.5);
-    settings.set_kill_threshold(0.85);
+    settings.set_kill_threshold(0.95);
     settings.set_poll_interval(30.0);
     NetworkSession::set_memory_pressure_settings(&mut settings);
 }
@@ -281,13 +227,16 @@ fn tab_grab_focus(app: &AppState) {
 
 fn zoom_current_tab(app: &AppState, delta: f64) {
     if let Some(tab) = current_tab(app) {
-        if delta == 0.0 {
-            tab.web_view
-                .set_zoom_level(app.browser_state.borrow().settings.default_zoom);
+        let level = if delta == 0.0 {
+            crate::zoom::DEFAULT_ZOOM
+        } else if delta > 0.0 {
+            crate::zoom::increase(tab.web_view.zoom_level())
         } else {
-            let level = (tab.web_view.zoom_level() + delta).clamp(0.3, 5.0);
-            tab.web_view.set_zoom_level(level);
-        }
+            crate::zoom::decrease(tab.web_view.zoom_level())
+        };
+        tab.web_view.set_zoom_level(level);
+        let uri = current_uri(&tab.web_view);
+        app.browser_state.borrow_mut().set_zoom_for_uri(&uri, level);
     }
 }
 
@@ -447,7 +396,7 @@ fn configure_web_view(web_view: &WebView, prefs: &SettingsData) {
     settings.set_enable_page_cache(true);
     settings.set_default_font_size(prefs.font_size);
     web_view.set_settings(&settings);
-    web_view.set_zoom_level(prefs.default_zoom);
+    web_view.set_zoom_level(crate::zoom::clamp(prefs.default_zoom));
 
     if let Some(session) = web_view.network_session() {
         if let Some(data_manager) = session.website_data_manager() {
@@ -471,7 +420,7 @@ fn apply_appearance(app: &Rc<AppState>) {
             && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
                 .map(|ptr| unsafe { ptr.as_ref().clone() })
         {
-            tab.web_view.set_zoom_level(prefs.default_zoom);
+            tab.web_view.set_zoom_level(crate::zoom::clamp(prefs.default_zoom));
             if let Some(settings) = webkit6::prelude::WebViewExt::settings(&tab.web_view) {
                 settings.set_default_font_size(prefs.font_size);
             }
@@ -770,7 +719,10 @@ fn navigate_tab(tab: &TabState, uri: &str) {
     if tab.loading.get() {
         web_view.stop_loading();
     }
-    glib::idle_add_local_once(move || web_view.load_uri(&target));
+    glib::idle_add_local_once(move || {
+        apply_site_user_agent(&web_view, &target);
+        web_view.load_uri(&target);
+    });
 }
 
 fn remove_tab_at(app: &Rc<AppState>, index: u32) {
@@ -936,7 +888,16 @@ fn load_uri_in_current_tab(app: &Rc<AppState>, uri: &str) {
     }
 }
 
-fn handle_script_message(app: &Rc<AppState>, message: &str) {
+fn handle_script_message(app: &Rc<AppState>, view: &WebView, message: &str) {
+    let uri = current_uri(view);
+    if let Some(rest) = message.strip_prefix("cred:") {
+        handle_credential_capture(app, rest, &origin_of(&uri));
+        return;
+    }
+    if !is_internal_uri(app, &uri) {
+        return;
+    }
+
     if let Some(uri) = message.strip_prefix("open:") {
         let decoded = glib::uri_unescape_string(uri, None::<&str>).unwrap_or_default();
         let app_open = app.clone();
@@ -1002,7 +963,7 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
 
     if let Some(zoom) = message.strip_prefix("save-zoom:") {
         if let Ok(value) = zoom.parse::<f64>() {
-            app.browser_state.borrow_mut().settings.default_zoom = value.clamp(0.3, 5.0);
+            app.browser_state.borrow_mut().settings.default_zoom = crate::zoom::clamp(value);
             app.browser_state.borrow().save();
             apply_appearance(app);
         }
@@ -1059,11 +1020,6 @@ fn handle_script_message(app: &Rc<AppState>, message: &str) {
         if app.vault.borrow_mut().remove(&decoded) {
             refresh_internal_pages(app);
         }
-        return;
-    }
-
-    if let Some(rest) = message.strip_prefix("cred:") {
-        handle_credential_capture(app, rest);
         return;
     }
 
@@ -1171,7 +1127,7 @@ if(!pw.value)pw.value=p;
 }
 
 // cred:<b64 origin>:<b64 user>:<b64 pass> from the capture user script.
-fn handle_credential_capture(app: &Rc<AppState>, payload: &str) {
+fn handle_credential_capture(app: &Rc<AppState>, payload: &str, expected_origin: &str) {
     let mut parts = payload.splitn(3, ':');
     let (Some(origin), Some(user), Some(pass)) = (parts.next(), parts.next(), parts.next()) else {
         return;
@@ -1185,7 +1141,11 @@ fn handle_credential_capture(app: &Rc<AppState>, payload: &str) {
     else {
         return;
     };
-    if origin.is_empty() || password.is_empty() || app.vault.borrow().is_never(&origin) {
+    if origin.is_empty()
+        || origin != expected_origin
+        || password.is_empty()
+        || app.vault.borrow().is_never(&origin)
+    {
         return;
     }
     if app.vault.borrow().get(&origin).map(|(u, p)| (u, p)) == Some((username.clone(), password.clone())) {
@@ -1569,7 +1529,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     let tab_icon = tab.clone();
     web_view.connect_favicon_notify(move |_| update_tab_favicon(&tab_icon));
 
-    web_view.connect_uri_notify(|view| apply_site_user_agent(view));
+    web_view.connect_uri_notify(|view| apply_site_user_agent(view, &current_uri(view)));
 
     // Camera / microphone / location / notification prompts, honoring stored rules.
     let app_perm = app.clone();
@@ -1656,6 +1616,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
         if event == LoadEvent::Finished {
             let uri = current_uri(view);
             let title = current_title(view);
+            view.set_zoom_level(app_load.browser_state.borrow().zoom_for_uri(&uri));
             if uri != app_load.new_tab_uri && is_internal_uri(&app_load, &uri) {
                 render_internal_page(&app_load, &tab_load);
             } else if !uri.is_empty() && uri != app_load.new_tab_uri {
@@ -1674,16 +1635,18 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     });
 
     let app_script = app.clone();
+    let script_view = web_view.clone();
     manager.connect_script_message_received(Some("ubar"), move |_, result| {
         if result.is_string() {
             let message = result.to_string();
-            handle_script_message(&app_script, &message);
+            handle_script_message(&app_script, &script_view, &message);
         }
     });
 
     update_tab_favicon(&tab);
     update_tab_audio(&tab);
     update_tab_title(app, &tab);
+    apply_site_user_agent(&web_view, uri);
     web_view.load_uri(uri);
     glib::idle_add_local_once(move || animate_tab_opacity(&tab_box, 0.0, 1.0));
     tab

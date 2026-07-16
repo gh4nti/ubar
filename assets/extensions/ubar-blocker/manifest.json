@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "uBar Blocker",
+  "version": "0.1.0",
+  "description": "Built-in network and cosmetic ad blocking foundation.",
+  "permissions": ["declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "default",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "css": ["blocker.css"],
+      "run_at": "document_start"
+    }
+  ]
+}

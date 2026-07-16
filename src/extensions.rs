@@ -1,6 +1,14 @@
 use serde::Deserialize;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FILES: usize = 20_000;
+const BUILTIN_BLOCKER_MANIFEST: &str = include_str!("../assets/extensions/ubar-blocker/manifest.json");
+const BUILTIN_BLOCKER_RULES: &str = include_str!("../assets/extensions/ubar-blocker/rules.json");
+const BUILTIN_BLOCKER_CSS: &str = include_str!("../assets/extensions/ubar-blocker/blocker.css");
 
 #[derive(Deserialize, Default)]
 struct ContentScript {
@@ -42,15 +50,38 @@ struct Manifest {
     options_ui: OptionsUi,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct ExtScript {
     pub source: String,
     pub allowlist: Vec<String>,
     pub at_start: bool,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+impl ExtScript {
+    pub fn initialization_source(&self) -> String {
+        guarded_source(&self.source, &self.allowlist, self.at_start)
+    }
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub struct ExtStyle {
     pub source: String,
     pub allowlist: Vec<String>,
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+impl ExtStyle {
+    pub fn initialization_source(&self) -> String {
+        let css = serde_json::to_string(&self.source).unwrap_or_else(|_| "\"\"".into());
+        guarded_source(
+            &format!(
+                "const s=document.createElement('style');s.textContent={css};(document.head||document.documentElement).appendChild(s);"
+            ),
+            &self.allowlist,
+            true,
+        )
+    }
 }
 
 #[derive(Default)]
@@ -61,6 +92,30 @@ pub struct Extensions {
     pub pages: Vec<String>,
     pub scripts: Vec<ExtScript>,
     pub styles: Vec<ExtStyle>,
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn guarded_source(source: &str, patterns: &[String], at_start: bool) -> String {
+    let patterns = serde_json::to_string(patterns).unwrap_or_else(|_| "[]".into());
+    let run = format!("()=>{{{source}}}");
+    let execute = if at_start {
+        format!("({run})()")
+    } else {
+        format!(
+            "document.readyState==='loading'?document.addEventListener('DOMContentLoaded',{run},{{once:true}}):({run})()"
+        )
+    };
+    format!(
+        r#"(()=>{{
+const patterns={patterns};
+const escape=value=>value.replace(/[.+?^${{}}()|[\]\\]/g,'\\$&');
+const matches=patterns.some(pattern=>{{
+ const expression='^'+pattern.split('*').map(escape).join('.*')+'$';
+ try{{return new RegExp(expression).test(location.href)}}catch(_error){{return false}}
+}});
+if(matches){{{execute};}}
+}})();"#
+    )
 }
 
 pub fn root() -> PathBuf {
@@ -89,6 +144,10 @@ fn zip_start(bytes: &[u8]) -> usize {
 
 // Install a downloaded .xpi/.crx into the extensions dir. Returns extension name.
 pub fn install_file(path: &Path) -> Result<String, String> {
+    let archive_size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if archive_size > MAX_ARCHIVE_BYTES {
+        return Err("extension archive is too large".into());
+    }
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
     let start = zip_start(&bytes);
     if start >= bytes.len() {
@@ -98,7 +157,6 @@ pub fn install_file(path: &Path) -> Result<String, String> {
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
 
     let manifest_text = {
-        use std::io::Read;
         let mut file = archive.by_name("manifest.json").map_err(|e| e.to_string())?;
         let mut text = String::new();
         file.read_to_string(&mut text).map_err(|e| e.to_string())?;
@@ -126,10 +184,79 @@ pub fn install_file(path: &Path) -> Result<String, String> {
         return Err("bad extension name".into());
     }
     let target = root().join(dir_name);
-    let _ = fs::remove_dir_all(&target);
-    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    archive.extract(&target).map_err(|e| e.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let staging = root().join(format!(".install-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+
+    let install_result = (|| -> Result<(), String> {
+        if archive.len() > MAX_FILES {
+            return Err("extension contains too many files".into());
+        }
+        let unpacked = (0..archive.len()).try_fold(0u64, |total, index| {
+            let file = archive.by_index(index).map_err(|e| e.to_string())?;
+            total
+                .checked_add(file.size())
+                .filter(|size| *size <= MAX_UNPACKED_BYTES)
+                .ok_or_else(|| "extension expands beyond the size limit".to_string())
+        })?;
+        if unpacked == 0 {
+            return Err("empty extension archive".into());
+        }
+
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
+            let relative = file
+                .enclosed_name()
+                .ok_or_else(|| "extension contains an unsafe path".to_string())?;
+            if file.is_symlink() {
+                return Err("extension contains a symbolic link".into());
+            }
+            let output = staging.join(relative);
+            if file.is_dir() {
+                fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut destination = fs::File::create(&output).map_err(|e| e.to_string())?;
+            std::io::copy(&mut file, &mut destination).map_err(|e| e.to_string())?;
+            destination.flush().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = install_result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if target.exists() {
+        fs::remove_dir_all(&target).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&staging, &target).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging);
+        e.to_string()
+    })?;
     Ok(name)
+}
+
+pub fn ensure_builtins() -> Result<(), String> {
+    let directory = root().join("ubar-blocker");
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    for (name, contents) in [
+        ("manifest.json", BUILTIN_BLOCKER_MANIFEST),
+        ("rules.json", BUILTIN_BLOCKER_RULES),
+        ("blocker.css", BUILTIN_BLOCKER_CSS),
+    ] {
+        let path = directory.join(name);
+        if fs::read_to_string(&path).ok().as_deref() != Some(contents) {
+            fs::write(path, contents).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 pub fn uninstall(name: &str, extensions: &Extensions) -> bool {
@@ -269,9 +396,6 @@ pub fn load() -> Extensions {
         }
     }
 
-    for name in &out.names {
-        println!("ubar: loaded extension: {name}");
-    }
     out
 }
 

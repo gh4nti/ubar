@@ -3,20 +3,27 @@ use chrono::Utc;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::rc::Rc;
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+use webview2_com::TrySuspendCompletedHandler;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
+use windows::core::Interface;
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos},
 };
 use wry::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
-use wry::{PageLoadEvent, Rect, WebView, WebViewBuilder, WebViewExtWindows};
+use wry::{
+    PageLoadEvent, Rect, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows,
+};
 
 const TOOLBAR_HEIGHT: f64 = 82.0;
 const MENU_OVERLAY_HEIGHT: f64 = 360.0;
@@ -34,7 +41,16 @@ enum UserEvent {
     Content(u64, String),
     Loaded(u64, String),
     Title(u64, String),
+    SuspendCompleted(u64, bool),
+    ExtensionsChanged,
     Exit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabLifecycle {
+    Active,
+    SuspendPending,
+    Suspended,
 }
 
 struct Tab {
@@ -43,6 +59,9 @@ struct Tab {
     uri: String,
     title: String,
     incognito: bool,
+    zoom: f64,
+    lifecycle: TabLifecycle,
+    loaded: bool,
 }
 
 struct App {
@@ -55,6 +74,41 @@ struct App {
     menu_open: bool,
     state: Rc<RefCell<BrowserState>>,
     new_tab_uri: String,
+    memory_policy: crate::memory_policy::MemoryPolicy,
+    private_window: bool,
+    benchmark_started: Option<std::time::Instant>,
+    benchmark_urls: Vec<String>,
+    benchmark_next: usize,
+    benchmark_loaded: HashSet<u64>,
+    benchmark_settled_at: Option<std::time::Instant>,
+    benchmark_trimmed_at: Option<std::time::Instant>,
+    benchmark_restore_started: Option<std::time::Instant>,
+    benchmark_restore_completed: Option<std::time::Instant>,
+    benchmark_reported: bool,
+}
+
+fn benchmark_urls() -> Vec<String> {
+    if let Ok(value) = std::env::var("UBAR_BENCHMARK_URLS") {
+        let urls = value
+            .split(',')
+            .map(str::trim)
+            .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if urls.len() == 5 {
+            return urls;
+        }
+    }
+    [
+        "https://github.com/",
+        "https://www.reddit.com/",
+        "https://www.wikipedia.org/",
+        "https://www.microsoft.com/",
+        "https://www.apple.com/",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn normalize_uri(input: &str, engine: &str) -> Option<String> {
@@ -96,7 +150,7 @@ window.addEventListener('keydown', event => {
   }
   if (!event.ctrlKey) return;
   const key = event.key.toLowerCase();
-  if (['l','t','w','r','d'].includes(key)) {
+  if (['l','t','w','r','d','+','=','-','0'].includes(key)) {
     event.preventDefault();
     window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key}));
   }
@@ -221,8 +275,11 @@ fn make_tab(
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
     let title_proxy = proxy.clone();
+    let download_proxy = proxy.clone();
     let download_state = state.clone();
-    let webview = WebViewBuilder::new()
+    let initial_zoom = state.borrow().zoom_for_uri(uri);
+    let store_identity_script = crate::store_identity::navigator_override_script();
+    let builder = WebViewBuilder::new()
         .with_custom_protocol("ubar".into(), |_, request| asset_response(request))
         .with_url(uri)
         .with_bounds(content_bounds(window))
@@ -230,7 +287,10 @@ fn make_tab(
         .with_incognito(incognito)
         .with_clipboard(true)
         .with_devtools(true)
+        .with_browser_extensions_enabled(true)
+        .with_extensions_path(crate::extensions::root())
         .with_initialization_script(content_script())
+        .with_initialization_script(store_identity_script)
         .with_ipc_handler(move |request| {
             let _ = ipc_proxy.send_event(UserEvent::Content(id, request.body().clone()));
         })
@@ -244,6 +304,9 @@ fn make_tab(
         })
         .with_download_completed_handler(move |uri, path, success| {
             let Some(path) = path else { return };
+            if incognito {
+                return;
+            }
             let filename = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -259,8 +322,17 @@ fn make_tab(
                 entry.status = if success { "finished" } else { "failed" }.into();
             }
             state.save();
-        })
-        .build_as_child(window)?;
+            drop(state);
+            let lower = filename.to_ascii_lowercase();
+            if success
+                && (lower.ends_with(".xpi") || lower.ends_with(".crx"))
+                && crate::extensions::install_file(&path).is_ok()
+            {
+                let _ = download_proxy.send_event(UserEvent::ExtensionsChanged);
+            }
+        });
+    let webview = builder.build_as_child(window)?;
+    let _ = webview.zoom(initial_zoom);
 
     Ok(Tab {
         id,
@@ -268,12 +340,99 @@ fn make_tab(
         uri: uri.into(),
         title: "New Tab".into(),
         incognito,
+        zoom: initial_zoom,
+        lifecycle: TabLifecycle::Active,
+        loaded: false,
     })
 }
 
 impl App {
+    fn request_suspend(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if tab.lifecycle != TabLifecycle::Active {
+            return;
+        }
+        if !tab.loaded {
+            return;
+        }
+        let Ok(core) = tab.webview.webview().cast::<ICoreWebView2_3>() else {
+            return;
+        };
+        let id = tab.id;
+        let proxy = self.proxy.clone();
+        let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
+            let _ = proxy.send_event(UserEvent::SuspendCompleted(
+                id,
+                result.is_ok() && suspended,
+            ));
+            result
+        }));
+        if unsafe { core.TrySuspend(&handler) }.is_ok() {
+            tab.lifecycle = TabLifecycle::SuspendPending;
+        }
+    }
+
+    fn resume_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        match tab.lifecycle {
+            TabLifecycle::Active => {}
+            TabLifecycle::SuspendPending => tab.lifecycle = TabLifecycle::Active,
+            TabLifecycle::Suspended => {
+                if let Ok(core) = tab.webview.webview().cast::<ICoreWebView2_3>()
+                    && unsafe { core.Resume() }.is_ok()
+                {
+                    tab.lifecycle = TabLifecycle::Active;
+                }
+            }
+        }
+    }
+
+    fn set_zoom(&mut self, level: f64) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let level = crate::zoom::clamp(level);
+        if tab.webview.zoom(level).is_ok() {
+            tab.zoom = level;
+            if !tab.incognito {
+                self.state.borrow_mut().set_zoom_for_uri(&tab.uri, level);
+            }
+            self.sync_toolbar();
+        }
+    }
+
+    fn zoom_in(&mut self) {
+        let level = self.tabs.get(self.active).map(|tab| tab.zoom).unwrap_or(1.0);
+        self.set_zoom(crate::zoom::increase(level));
+    }
+
+    fn zoom_out(&mut self) {
+        let level = self.tabs.get(self.active).map(|tab| tab.zoom).unwrap_or(1.0);
+        self.set_zoom(crate::zoom::decrease(level));
+    }
+
     fn add_tab(&mut self, uri: String) {
-        self.add_tab_with_mode(uri, false);
+        self.add_tab_with_mode(uri, self.private_window);
+    }
+
+    fn open_private_window(&self) {
+        match std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|executable| {
+                Command::new(executable)
+                    .arg("--incognito")
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+        {
+            Ok(()) => {}
+            Err(error) => eprintln!("ubar: could not open private window: {error}"),
+        }
     }
 
     fn add_tab_with_mode(&mut self, uri: String, incognito: bool) {
@@ -286,6 +445,9 @@ impl App {
             Ok(tab) => {
                 if let Some(active) = self.tabs.get(self.active) {
                     let _ = active.webview.set_visible(false);
+                }
+                if !self.tabs.is_empty() {
+                    self.request_suspend(self.active);
                 }
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
@@ -301,12 +463,18 @@ impl App {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        let was_active = index == self.active;
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.save_session();
             let _ = self.proxy.send_event(UserEvent::Exit);
         } else {
-            self.active = self.active.min(self.tabs.len() - 1);
+            if index < self.active {
+                self.active -= 1;
+            } else if was_active {
+                self.active = index.min(self.tabs.len() - 1);
+            }
+            self.resume_tab(self.active);
             let _ = self.tabs[self.active].webview.set_visible(true);
             let _ = self.tabs[self.active].webview.focus();
             self.sync_toolbar();
@@ -317,10 +485,15 @@ impl App {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        if index == self.active {
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active) {
             let _ = tab.webview.set_visible(false);
         }
+        self.request_suspend(self.active);
         self.active = index;
+        self.resume_tab(index);
         let _ = self.tabs[index].webview.set_visible(true);
         let _ = self.tabs[index].webview.focus();
         self.sync_toolbar();
@@ -406,7 +579,24 @@ impl App {
                 serde_json::json!({"items": items})
             )
         } else if tab.uri.contains("/pages/extensions/") {
-            "window.ubarRenderExtensions?.({items:[]});".into()
+            let extensions = crate::extensions::load();
+            let items = extensions
+                .names
+                .iter()
+                .zip(extensions.dirs.iter())
+                .zip(extensions.pages.iter())
+                .map(|((name, dir), page)| {
+                    serde_json::json!({
+                        "name": name,
+                        "dir": dir.to_string_lossy(),
+                        "page": page
+                    })
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "window.ubarRenderExtensions?.({});",
+                serde_json::json!({"items": items})
+            )
         } else if tab.uri.contains("/pages/settings/") {
             format!(
                 "window.ubarRenderSettings?.({});",
@@ -455,6 +645,12 @@ impl App {
             state.save();
             drop(state);
             self.render_internal(tab.id);
+        } else if let Some(name) = message.strip_prefix("delete-extension:") {
+            let extensions = crate::extensions::load();
+            if crate::extensions::uninstall(&percent_decode(name), &extensions) {
+                self.render_internal(tab.id);
+                self.sync_toolbar();
+            }
         }
     }
 
@@ -475,11 +671,22 @@ impl App {
             .map(|tab| tab.uri.as_str())
             .unwrap_or("");
         let bookmarked = self.state.borrow().is_bookmarked(uri);
+        let zoom = self.tabs.get(self.active).map(|tab| tab.zoom).unwrap_or(1.0);
+        let loaded = crate::extensions::load();
+        let extensions = loaded
+            .names
+            .iter()
+            .zip(loaded.pages.iter())
+            .filter(|(_, page)| !page.is_empty())
+            .map(|(name, page)| serde_json::json!({"name": name, "page": page}))
+            .collect::<Vec<_>>();
         self.toolbar_eval(&format!(
-            "window.ubarRender({}, {}, {});",
+            "window.ubarRender({}, {}, {}, {}, {});",
             serde_json::to_string(&tabs).unwrap(),
             serde_json::to_string(uri).unwrap(),
-            bookmarked
+            bookmarked,
+            zoom,
+            serde_json::to_string(&extensions).unwrap()
         ));
     }
 
@@ -508,7 +715,12 @@ impl App {
                 };
                 self.open_internal_page(&uri);
             }
-            "incognito" => self.add_tab_with_mode(self.new_tab_uri.clone(), true),
+            "open-extension" => {
+                if let Some(uri) = value["value"].as_str() {
+                    self.open_internal_page(uri);
+                }
+            }
+            "incognito" => self.open_private_window(),
             "reading-mode" => {
                 let _ = self.tabs[target].webview.evaluate_script(
                     r#"(() => {
@@ -521,14 +733,36 @@ document.documentElement.append(style);
 })()"#,
                 );
             }
+            "benchmark-ready" => {
+                if self.benchmark_restore_started.is_some()
+                    && self.benchmark_restore_completed.is_none()
+                {
+                    self.benchmark_restore_completed = Some(std::time::Instant::now());
+                }
+            }
             "task-manager" => {
-                let lines = self
+                let mut lines = self
                     .tabs
                     .iter()
                     .enumerate()
-                    .map(|(index, tab)| format!("{}. {}", index + 1, tab.title))
+                    .map(|(index, tab)| {
+                        format!("{}. {} [{:?}]", index + 1, tab.title, tab.lifecycle)
+                    })
                     .collect::<Vec<_>>()
                     .join("\\n");
+                let measured = crate::process_metrics::browser_tree_memory();
+                let drm = crate::drm::detect().label();
+                lines.push_str(&format!(
+                    "\\n\\nResident now: {} MiB\\nPrivate committed: {} MiB\\nProcesses: {}\\nMemory target: {} MiB\\nElastic ceiling: {} MiB\\nRenderer limit: {}{}\\nDRM: {}",
+                    measured.resident_bytes / (1024 * 1024),
+                    measured.committed_bytes / (1024 * 1024),
+                    measured.process_count,
+                    self.memory_policy.preferred_resident_bytes / (1024 * 1024),
+                    self.memory_policy.elastic_ceiling_bytes / (1024 * 1024),
+                    self.memory_policy.renderer_limit,
+                    if self.memory_policy.constrained { " (constrained mode)" } else { "" },
+                    drm
+                ));
                 self.toolbar_eval(&format!(
                     "alert({})",
                     serde_json::to_string(&lines).unwrap()
@@ -593,6 +827,9 @@ document.documentElement.append(style);
                 );
                 self.sync_toolbar();
             }
+            "zoom-in" => self.zoom_in(),
+            "zoom-out" => self.zoom_out(),
+            "zoom-reset" => self.set_zoom(crate::zoom::DEFAULT_ZOOM),
             "devtools" => self.tabs[target].webview.open_devtools(),
             "shortcut" => match value["key"].as_str().unwrap_or("") {
                 "l" => self.toolbar_eval("window.ubarFocusAddress()"),
@@ -610,6 +847,9 @@ document.documentElement.append(style);
                     );
                     self.sync_toolbar();
                 }
+                "+" | "=" => self.zoom_in(),
+                "-" => self.zoom_out(),
+                "0" => self.set_zoom(crate::zoom::DEFAULT_ZOOM),
                 _ => {}
             },
             _ => {}
@@ -617,8 +857,16 @@ document.documentElement.append(style);
     }
 
     fn save_session(&self) {
+        if self.private_window {
+            return;
+        }
         let mut state = self.state.borrow_mut();
-        state.open_tabs = self.tabs.iter().map(|tab| tab.uri.clone()).collect();
+        state.open_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| !tab.incognito)
+            .map(|tab| tab.uri.clone())
+            .collect();
         state.save();
     }
 }
@@ -631,7 +879,11 @@ impl ApplicationHandler<UserEvent> for App {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("ubar")
+                    .with_title(if self.private_window {
+                        "uBar Private"
+                    } else {
+                        "ubar"
+                    })
                     .with_decorations(false)
                     .with_inner_size(PhysicalSize::new(1280, 800)),
             )
@@ -639,6 +891,8 @@ impl ApplicationHandler<UserEvent> for App {
         let proxy = self.proxy.clone();
         let toolbar = WebViewBuilder::new()
             .with_custom_protocol("ubar".into(), |_, request| asset_response(request))
+            .with_browser_extensions_enabled(true)
+            .with_extensions_path(crate::extensions::root())
             .with_initialization_script(
                 "if(!window.ipc){window.ipc={postMessage:function(m){window.chrome.webview.postMessage(m);}};}",
             )
@@ -657,7 +911,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let saved = self.state.borrow().open_tabs.clone();
-        let initial = if saved.is_empty() {
+        let initial = if self.private_window {
+            vec![self.new_tab_uri.clone()]
+        } else if self.benchmark_started.is_some() {
+            self.benchmark_urls.first().cloned().into_iter().collect()
+        } else if saved.is_empty() {
             vec![self.new_tab_uri.clone()]
         } else {
             saved
@@ -666,6 +924,74 @@ impl ApplicationHandler<UserEvent> for App {
             self.add_tab(uri);
         }
 
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.benchmark_reported {
+            return;
+        }
+        let Some(started) = self.benchmark_started else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if self.benchmark_trimmed_at.is_none()
+            && self
+                .benchmark_settled_at
+                .is_some_and(|loaded| now.duration_since(loaded).as_secs() >= 10)
+        {
+            let trimmed = crate::process_metrics::trim_browser_children_working_sets();
+            eprintln!("ubar benchmark: trimmed {trimmed} child working sets");
+            self.benchmark_trimmed_at = Some(now);
+        }
+        if self.benchmark_restore_started.is_none()
+            && self
+                .benchmark_trimmed_at
+                .is_some_and(|trimmed| now.duration_since(trimmed).as_secs() >= 2)
+            && let Some(id) = self.tabs.first().map(|tab| tab.id)
+        {
+            self.benchmark_restore_started = Some(now);
+            self.select_tab(id);
+            if let Some(tab) = self.tabs.get(self.active) {
+                let _ = tab.webview.evaluate_script(
+                    "requestAnimationFrame(()=>requestAnimationFrame(()=>window.ipc.postMessage(JSON.stringify({cmd:'benchmark-ready'}))))",
+                );
+            }
+        }
+        let settled = self
+            .benchmark_restore_completed
+            .is_some_and(|restored| now.duration_since(restored).as_secs() >= 3);
+        let timed_out = now.duration_since(started).as_secs() >= 90;
+        if settled || timed_out {
+            self.benchmark_reported = true;
+            let memory = crate::process_metrics::browser_tree_memory();
+            let report = serde_json::json!({
+                "profile": "five-modern-tabs",
+                "complete": settled,
+                "elapsed_seconds": now.duration_since(started).as_secs(),
+                "loaded_tabs": self.benchmark_loaded.len(),
+                "tab_count": self.tabs.len(),
+                "resident_bytes": memory.resident_bytes,
+                "resident_mib": memory.resident_bytes / (1024 * 1024),
+                "private_committed_bytes": memory.committed_bytes,
+                "private_committed_mib": memory.committed_bytes / (1024 * 1024),
+                "restore_animation_frame_ms": self.benchmark_restore_started.zip(self.benchmark_restore_completed).map(|(start, end)| end.duration_since(start).as_millis()),
+                "process_count": memory.process_count,
+                "physical_memory_bytes": self.memory_policy.physical_bytes,
+                "preferred_resident_bytes": self.memory_policy.preferred_resident_bytes,
+                "elastic_ceiling_bytes": self.memory_policy.elastic_ceiling_bytes,
+                "tabs": self.tabs.iter().map(|tab| serde_json::json!({
+                    "uri": tab.uri,
+                    "title": tab.title,
+                    "lifecycle": format!("{:?}", tab.lifecycle),
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            event_loop.exit();
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                now + std::time::Duration::from_secs(1),
+            ));
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -695,9 +1021,40 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Toolbar(message) => self.handle_command(None, &message),
             UserEvent::Content(id, message) => self.handle_command(Some(id), &message),
             UserEvent::Loaded(id, uri) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if uri == "about:blank"
+                    && self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == id)
+                        .is_some_and(|tab| tab.uri != "about:blank")
+                {
+                    return;
+                }
+                if self.benchmark_started.is_some() {
+                    self.benchmark_loaded.insert(id);
+                    if self.benchmark_loaded.len() == self.benchmark_urls.len()
+                        && self.benchmark_settled_at.is_none()
+                    {
+                        self.benchmark_settled_at = Some(std::time::Instant::now());
+                    }
+                }
+                let zoom = self.state.borrow().zoom_for_uri(&uri);
+                let mut loaded_index = None;
+                if let Some((index, tab)) = self
+                    .tabs
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_, tab)| tab.id == id)
+                {
                     tab.uri = uri.clone();
-                    if !uri.contains("ubar.localhost") && !uri.starts_with("ubar:") {
+                    tab.zoom = zoom;
+                    tab.loaded = true;
+                    loaded_index = Some(index);
+                    let _ = tab.webview.zoom(zoom);
+                    if !tab.incognito
+                        && !uri.contains("ubar.localhost")
+                        && !uri.starts_with("ubar:")
+                    {
                         self.state.borrow_mut().add_history(
                             &tab.title,
                             &uri,
@@ -705,8 +1062,20 @@ impl ApplicationHandler<UserEvent> for App {
                         );
                     }
                 }
+                if let Some(index) = loaded_index
+                    && index != self.active
+                {
+                    self.request_suspend(index);
+                }
                 self.render_internal(id);
                 self.sync_toolbar();
+                if self.benchmark_started.is_some()
+                    && self.benchmark_next < self.benchmark_urls.len()
+                {
+                    let next = self.benchmark_urls[self.benchmark_next].clone();
+                    self.benchmark_next += 1;
+                    self.add_tab(next);
+                }
             }
             UserEvent::Title(id, title) => {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
@@ -715,15 +1084,50 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.tabs.get(self.active).is_some_and(|tab| tab.id == id)
                     && let Some(window) = &self.window
                 {
-                    window.set_title(&format!("{} - ubar", self.tabs[self.active].title));
+                    window.set_title(&format!(
+                        "{} - {}",
+                        self.tabs[self.active].title,
+                        if self.private_window {
+                            "uBar Private"
+                        } else {
+                            "ubar"
+                        }
+                    ));
                 }
                 self.sync_toolbar();
+            }
+            UserEvent::SuspendCompleted(id, suspended) => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                    self.tabs[index].lifecycle = if suspended {
+                        TabLifecycle::Suspended
+                    } else {
+                        TabLifecycle::Active
+                    };
+                    if index == self.active {
+                        self.resume_tab(index);
+                    }
+                }
+            }
+            UserEvent::ExtensionsChanged => {
+                self.sync_toolbar();
+                let ids = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.uri.contains("/pages/extensions/"))
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    self.render_internal(id);
+                }
             }
         }
     }
 }
 
 pub fn run() {
+    let benchmark = std::env::args().any(|argument| argument == "--benchmark-five-tabs");
+    let private_window = std::env::args().any(|argument| argument == "--incognito");
+    let benchmark_urls = benchmark.then(benchmark_urls).unwrap_or_default();
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("create event loop");
@@ -738,6 +1142,17 @@ pub fn run() {
         menu_open: false,
         state: Rc::new(RefCell::new(BrowserState::load())),
         new_tab_uri: NEW_TAB_URI.into(),
+        memory_policy: crate::memory_policy::MemoryPolicy::detect(),
+        private_window,
+        benchmark_started: benchmark.then(std::time::Instant::now),
+        benchmark_next: usize::from(benchmark),
+        benchmark_urls,
+        benchmark_loaded: HashSet::new(),
+        benchmark_settled_at: None,
+        benchmark_trimmed_at: None,
+        benchmark_restore_started: None,
+        benchmark_restore_completed: None,
+        benchmark_reported: false,
     };
     event_loop.run_app(&mut app).expect("run ubar");
 }

@@ -88,6 +88,8 @@ pub struct BrowserState {
     pub downloads: Vec<DownloadEntry>,
     #[serde(default)]
     pub download_counter: u64,
+    #[serde(default)]
+    pub site_zoom: BTreeMap<String, f64>,
     #[serde(skip)]
     pub path: PathBuf,
 }
@@ -218,6 +220,20 @@ impl BrowserState {
 
     pub fn download_mut(&mut self, id: u64) -> Option<&mut DownloadEntry> {
         self.downloads.iter_mut().find(|entry| entry.id == id)
+    }
+
+    pub fn zoom_for_uri(&self, uri: &str) -> f64 {
+        crate::zoom::origin(uri)
+            .and_then(|origin| self.site_zoom.get(&origin).copied())
+            .map(crate::zoom::clamp)
+            .unwrap_or_else(|| crate::zoom::clamp(self.settings.default_zoom))
+    }
+
+    pub fn set_zoom_for_uri(&mut self, uri: &str, zoom: f64) {
+        if let Some(origin) = crate::zoom::origin(uri) {
+            self.site_zoom.insert(origin, crate::zoom::clamp(zoom));
+            self.save();
+        }
     }
 
     pub fn remove_bookmark(&mut self, uri: &str) -> bool {

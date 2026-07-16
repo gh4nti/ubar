@@ -4,8 +4,10 @@ const add = document.getElementById('new');
 const dragRegion = document.getElementById('drag-region');
 const address = document.getElementById('address');
 const bookmark = document.getElementById('bookmark');
+const extensionActions = document.getElementById('extension-actions');
 const more = document.getElementById('more');
 const menu = document.getElementById('app-menu');
+const zoomValue = document.getElementById('zoom-value');
 const hideMenu = () => {
   if (menu.hidden) return;
   menu.hidden = true;
@@ -52,7 +54,14 @@ window.addEventListener('keydown', event => {
     return;
   }
   if (!event.ctrlKey) return;
-  const commands = {l: () => window.ubarFocusAddress(), t: () => send({cmd: 'new-tab'})};
+  const commands = {
+    l: () => window.ubarFocusAddress(),
+    t: () => send({cmd: 'new-tab'}),
+    '+': () => send({cmd: 'zoom-in'}),
+    '=': () => send({cmd: 'zoom-in'}),
+    '-': () => send({cmd: 'zoom-out'}),
+    '0': () => send({cmd: 'zoom-reset'}),
+  };
   const command = commands[event.key.toLowerCase()];
   if (command) {
     event.preventDefault();
@@ -65,7 +74,7 @@ window.ubarFocusAddress = () => {
   address.select();
 };
 
-window.ubarRender = (items, uri, bookmarked) => {
+window.ubarRender = (items, uri, bookmarked, zoom = 1, extensions = []) => {
   tabs.querySelectorAll('.tab').forEach(tab => tab.remove());
   for (const item of items) {
     const tab = document.createElement('button');
@@ -90,6 +99,16 @@ window.ubarRender = (items, uri, bookmarked) => {
   if (document.activeElement !== address) address.value = uri.includes('ubar.localhost') || uri.startsWith('ubar:') ? '' : uri;
   bookmark.classList.toggle('active', bookmarked);
   bookmark.innerHTML = bookmarked ? '&#x2605;' : '&#x2606;';
+  zoomValue.textContent = `${Math.round(zoom * 100)}%`;
+  extensionActions.replaceChildren();
+  for (const extension of extensions) {
+    const button = document.createElement('button');
+    button.className = 'extension-action';
+    button.textContent = (extension.name || '?').slice(0, 1).toUpperCase();
+    button.title = extension.name;
+    button.addEventListener('click', () => send({cmd: 'open-extension', value: extension.page}));
+    extensionActions.append(button);
+  }
 };
 
 send({cmd: 'ready'});

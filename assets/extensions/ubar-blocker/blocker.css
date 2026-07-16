@@ -1,0 +1,8 @@
+iframe[src*="doubleclick.net"],
+iframe[src*="googlesyndication.com"],
+.adsbygoogle,
+[id^="google_ads_"],
+[data-ad-client],
+[data-ad-slot] {
+  display: none !important;
+}

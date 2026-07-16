@@ -22,6 +22,8 @@ button:hover, button.active { background: #ffffff18; }
 #address { flex: 1; height: 34px; padding: 0 12px; background: #303134; color: inherit; outline: none; }
 #address:focus { box-shadow: 0 0 0 2px #8ab4f8; }
 #bookmark.active { color: #fbbc04; }
+#extension-actions { display: flex; gap: 2px; }
+.extension-action { width: 28px; min-width: 28px; font-weight: 700; }
 #app-menu {
   position: absolute;
   top: 78px;
@@ -46,6 +48,8 @@ button:hover, button.active { background: #ffffff18; }
   text-align: left;
   white-space: nowrap;
 }
+.zoom-controls { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 4px; }
+.zoom-controls button { text-align: center; background: #ffffff0c; }
 @media (prefers-color-scheme: light) {
   body { color: #202124; }
   #tabs, #nav { background: #f1f3f4; }
