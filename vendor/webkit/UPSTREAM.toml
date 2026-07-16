@@ -1,0 +1,14 @@
+repository = "https://github.com/WebKit/WebKit.git"
+commit = "3af9d4073d75a9b44668cebc03a41223dbef5745"
+fetched_at_utc = "2026-07-16"
+
+[ports]
+windows = "upstream Windows Cairo port; x86-64 baseline"
+macos = "upstream Apple macOS port"
+linux = "upstream WebKitGTK port"
+
+[policy]
+allow_moving_head = false
+require_patch_queue = true
+require_license_inventory = true
+require_upstream_security_tracking = true

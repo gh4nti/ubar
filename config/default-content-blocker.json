@@ -1,0 +1,12 @@
+[
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?doubleclick\\.net(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?googlesyndication\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?googleadservices\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?adnxs\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?adsrvr\\.org(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?taboola\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?outbrain\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?scorecardresearch\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?amazon-adsystem\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"^https?://([^/]+\\.)?criteo\\.com(?:[^A-Za-z0-9_.%-]|$)"},"action":{"type":"block"}}
+]

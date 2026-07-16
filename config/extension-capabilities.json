@@ -1,0 +1,22 @@
+{
+  "implemented": [
+    { "namespace": "runtime", "name": "getManifest", "kind": "Function" },
+    { "namespace": "runtime", "name": "connect", "kind": "Function" },
+    { "namespace": "runtime", "name": "getBrowserInfo", "kind": "Function" },
+    { "namespace": "runtime", "name": "getFrameId", "kind": "Function" },
+    { "namespace": "runtime", "name": "getPlatformInfo", "kind": "Function" },
+    { "namespace": "runtime", "name": "getURL", "kind": "Function" },
+    { "namespace": "runtime", "name": "sendMessage", "kind": "Function" },
+    { "namespace": "storage", "name": "local", "kind": "Property" },
+    { "namespace": "storage", "name": "session", "kind": "Property" },
+    { "namespace": "storage", "name": "sync", "kind": "Property" },
+    { "namespace": "permissions", "name": "contains", "kind": "Function" },
+    { "namespace": "permissions", "name": "getAll", "kind": "Function" },
+    { "namespace": "permissions", "name": "remove", "kind": "Function" },
+    { "namespace": "permissions", "name": "request", "kind": "Function" },
+    { "namespace": "tabs", "name": "create", "kind": "Function" },
+    { "namespace": "tabs", "name": "query", "kind": "Function" },
+    { "namespace": "tabs", "name": "remove", "kind": "Function" },
+    { "namespace": "tabs", "name": "update", "kind": "Function" }
+  ]
+}

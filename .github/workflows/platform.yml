@@ -1,0 +1,54 @@
+name: platform
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ubar-engine-abi -p ubar-browser-core -p ubar-extension-host
+
+  windows-shell:
+    runs-on: windows-2025
+    strategy:
+      matrix:
+        platform: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build platform/windows/UbarShell/UbarShell.csproj -c Release -p:Platform=${{ matrix.platform }}
+
+  macos-shell:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build -c release --package-path platform/macos/UbarShell
+
+  linux-gtk3-shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y libgtk-3-dev meson ninja-build
+      - run: meson setup platform/linux/gtk3/build platform/linux/gtk3 --buildtype=release
+      - run: meson compile -C platform/linux/gtk3/build
+
+  legacy-windows-app:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p ubar --all-targets

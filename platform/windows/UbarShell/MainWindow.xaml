@@ -1,0 +1,23 @@
+<Window
+    x:Class="UbarShell.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    Title="uBar">
+  <Grid RowDefinitions="Auto,*" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Border Grid.Row="0" Margin="12" Padding="8" CornerRadius="18"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="8">
+        <Button Grid.Column="0" Content="←" AutomationProperties.Name="Back" Click="Back_Click" />
+        <Button Grid.Column="1" Content="→" AutomationProperties.Name="Forward" Click="Forward_Click" />
+        <AutoSuggestBox x:Name="Address" Grid.Column="2" PlaceholderText="Search or enter address"
+                        QuerySubmitted="Address_QuerySubmitted" AutomationProperties.Name="Address" />
+        <Button Grid.Column="3" Content="Private" Click="Private_Click" />
+        <Button Grid.Column="4" Content="⋯" AutomationProperties.Name="Browser menu" />
+      </Grid>
+    </Border>
+    <controls:TabView x:Name="Tabs" Grid.Row="1" Margin="8,0,8,8"
+                      AddTabButtonClick="Tabs_AddTabButtonClick" TabCloseRequested="Tabs_TabCloseRequested"
+                      SelectionChanged="Tabs_SelectionChanged" />
+  </Grid>
+</Window>

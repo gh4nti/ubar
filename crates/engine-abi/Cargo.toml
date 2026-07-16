@@ -1,0 +1,8 @@
+[package]
+name = "ubar-engine-abi"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]

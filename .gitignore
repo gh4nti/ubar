@@ -1,6 +1,11 @@
 build/
 *.o
 target/
+vendor/firefox-schemas/src/
+vendor/webkit/src/
+platform/**/build/
+platform/**/bin/
+platform/**/obj/
 
 .venv/
 .idea/

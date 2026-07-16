@@ -3,6 +3,16 @@ name = "ubar"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    "crates/browser-core",
+    "crates/engine-abi",
+    "crates/extension-host",
+    "crates/drm-host",
+    "crates/engine-host",
+]
+resolver = "3"
+
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"

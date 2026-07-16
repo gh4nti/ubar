@@ -1,0 +1,8 @@
+repository = "https://github.com/mozilla-firefox/firefox.git"
+commit = "79223b6429f6d8844435cfdbf68ad699367bfec5"
+fetched_at_utc = "2026-07-16"
+
+paths = [
+    "browser/components/extensions/schemas",
+    "toolkit/components/extensions/schemas",
+]
