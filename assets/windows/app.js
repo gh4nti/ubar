@@ -121,6 +121,8 @@ window.addEventListener('keydown', event => {
   const commands = {
     l: () => window.ubarFocusAddress(),
     t: () => send({cmd: 'new-tab'}),
+    w: () => send({cmd: 'shortcut', key: 'w'}),
+    n: () => send({cmd: 'shortcut', key: 'n', shift: event.shiftKey}),
     j: () => send({cmd: 'shortcut', key: 'j'}),
     h: () => send({cmd: 'shortcut', key: 'h'}),
     ',': () => send({cmd: 'shortcut', key: ','}),
@@ -132,8 +134,8 @@ window.addEventListener('keydown', event => {
     '0': () => send({cmd: 'zoom-reset'}),
   };
   const command = commands[event.key.toLowerCase()];
-  const internalKey = ['h', ',', 'o', 'x'].includes(key);
-  if (command && (!internalKey || event.shiftKey === ['o', 'x'].includes(key))) {
+  const internalKey = ['h', ',', 'o', 'x', 'n'].includes(key);
+  if (command && (!internalKey || event.shiftKey === ['o', 'x', 'n'].includes(key))) {
     event.preventDefault();
     command();
   }
@@ -143,6 +145,7 @@ window.ubarFocusAddress = () => {
   address.focus();
   address.select();
 };
+window.ubarFocusAddress();
 
 window.ubarRender = (items, uri, bookmarked, zoom = 1, extensions = []) => {
   tabs.querySelectorAll('.tab').forEach(tab => tab.remove());

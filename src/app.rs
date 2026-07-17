@@ -188,6 +188,21 @@ fn focus_address_bar(app: &AppState) {
     app.address_entry.select_region(0, -1);
 }
 
+fn focus_address_bar_later(app: &AppState) {
+    let entry = app.address_entry.clone();
+    glib::idle_add_local_once(move || {
+        entry.grab_focus();
+        entry.select_region(0, -1);
+    });
+}
+
+fn primary_modifier(state: gdk::ModifierType) -> bool {
+    #[cfg(target_os = "macos")]
+    return state.contains(gdk::ModifierType::META_MASK);
+    #[cfg(not(target_os = "macos"))]
+    return state.contains(gdk::ModifierType::CONTROL_MASK);
+}
+
 fn find_search(app: &AppState) {
     let text = app.find_entry.text();
     if let Some(tab) = current_tab(app)
@@ -1402,7 +1417,7 @@ function addBtn(){
   var old=document.getElementById('ubar-install');
   var m=location.pathname.match(/\/detail\/[^\/]+\/([a-p]{32})/);
   if(!m){if(old)old.remove();return;}
-  var url='https://clients2.google.com/service/update2/crx?response=redirect&prodversion=140.0.0.0&acceptformat=crx2,crx3&x=id%3D'+m[1]+'%26uc';
+  var url='https://clients2.google.com/service/update2/crx?response=redirect&prodversion=152.0.0.0&acceptformat=crx3&x=id%3D'+m[1]+'%26uc';
   if(old){old.dataset.href=url;return;}
   var b=document.createElement('button');
   b.id='ubar-install';b.textContent='Install in ubar';b.dataset.href=url;
@@ -1867,6 +1882,31 @@ fn open_incognito_window(app: &Rc<AppState>) {
     web_view.connect_uri_notify(move |view| {
         entry_sync.set_text(&current_uri(view));
     });
+
+    let focus_entry = entry.clone();
+    let private_app = app.clone();
+    let private_window = window.clone();
+    let keys = EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if primary_modifier(state) && matches!(key, gdk::Key::l | gdk::Key::L) {
+            focus_entry.grab_focus();
+            focus_entry.select_region(0, -1);
+            return glib::Propagation::Stop;
+        }
+        if primary_modifier(state)
+            && state.contains(gdk::ModifierType::SHIFT_MASK)
+            && matches!(key, gdk::Key::n | gdk::Key::N)
+        {
+            open_incognito_window(&private_app);
+            return glib::Propagation::Stop;
+        }
+        if primary_modifier(state) && matches!(key, gdk::Key::w | gdk::Key::W) {
+            private_window.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(keys);
 
     window.present();
     entry.grab_focus();
@@ -2566,6 +2606,9 @@ pub fn run() {
                 update_active_tab_styles(notebook, page_num);
                 sync_window(&app_switch, &tab);
                 scroll_tab_into_view(&app_switch, &tab.tab_box);
+                if current_uri(&tab.web_view) == app_switch.new_tab_uri {
+                    focus_address_bar_later(&app_switch);
+                }
             }
         });
 
@@ -2573,7 +2616,7 @@ pub fn run() {
         controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let app_keys = app.clone();
         controller.connect_key_pressed(move |_, key, _, state| {
-            if !state.contains(gdk::ModifierType::CONTROL_MASK) {
+            if !primary_modifier(state) {
                 if key == gdk::Key::Escape && state.contains(gdk::ModifierType::SHIFT_MASK) {
                     open_task_manager(&app_keys);
                     return glib::Propagation::Stop;
@@ -2776,6 +2819,7 @@ pub fn run() {
             if app_start.notebook.n_pages() > 0 {
                 select_tab(&app_start, 0);
             }
+            focus_address_bar(&app_start);
         });
     });
     application.run();

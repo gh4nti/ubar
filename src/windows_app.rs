@@ -9,9 +9,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
-    ICoreWebView2_3, ICoreWebView2_4, ICoreWebView2DownloadOperation,
+    ICoreWebView2_3, ICoreWebView2_4, ICoreWebView2DownloadOperation, ICoreWebView2Settings2,
 };
 use webview2_com::{
     BytesReceivedChangedEventHandler, DownloadStartingEventHandler, StateChangedEventHandler,
@@ -21,7 +22,7 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{ResizeDirection, Window, WindowId};
-use windows::core::{Interface, PCWSTR, PWSTR, w};
+use windows::core::{HSTRING, Interface, PCWSTR, PWSTR, w};
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -40,12 +41,14 @@ use wry::{
 const TOOLBAR_HEIGHT: f64 = 82.0;
 const MENU_OVERLAY_HEIGHT: f64 = 360.0;
 const NEW_TAB_URI: &str = "ubar://localhost/newtab/index.html";
+const NEW_TAB_WEBVIEW2_URI: &str = "http://ubar.localhost/newtab/index.html";
 const TOOLBAR_URI: &str = "ubar://localhost/windows/index.html";
 const HISTORY_URI: &str = "ubar://localhost/pages/history/index.html";
 const BOOKMARKS_URI: &str = "ubar://localhost/pages/bookmarks/index.html";
 const DOWNLOADS_URI: &str = "ubar://localhost/pages/downloads/index.html";
 const EXTENSIONS_URI: &str = "ubar://localhost/pages/extensions/index.html";
 const SETTINGS_URI: &str = "ubar://localhost/pages/settings/index.html";
+static DEFAULT_WEBVIEW_USER_AGENT: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug)]
 enum UserEvent {
@@ -169,7 +172,7 @@ window.addEventListener('keydown', event => {
   const key = event.key.toLowerCase();
   if (['l','t','w','r','d','j','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)
       || (!event.shiftKey && ['h',','].includes(key))
-      || (event.shiftKey && ['o','x'].includes(key))) {
+      || (event.shiftKey && ['o','x','n'].includes(key))) {
     event.preventDefault();
     window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key,shift:event.shiftKey}));
   }
@@ -335,6 +338,35 @@ fn download_directory(state: &BrowserState) -> PathBuf {
     }
 }
 
+fn is_empty_new_tab(uri: &str) -> bool {
+    uri == NEW_TAB_URI || uri == NEW_TAB_WEBVIEW2_URI
+}
+
+fn remember_default_user_agent(webview: &WebView) {
+    if DEFAULT_WEBVIEW_USER_AGENT.get().is_some() {
+        return;
+    }
+    let Ok(settings) = (unsafe { webview.webview().Settings() }) else { return };
+    let Ok(settings) = settings.cast::<ICoreWebView2Settings2>() else { return };
+    let mut value = PWSTR::null();
+    if unsafe { settings.UserAgent(&mut value) }.is_ok() {
+        let value = take_pwstr(value);
+        if !value.is_empty() {
+            let _ = DEFAULT_WEBVIEW_USER_AGENT.set(value);
+        }
+    }
+}
+
+fn apply_site_user_agent(webview: &WebView, uri: &str) {
+    let user_agent = crate::store_identity::for_uri(uri)
+        .map(crate::store_identity::user_agent)
+        .or_else(|| DEFAULT_WEBVIEW_USER_AGENT.get().map(String::as_str));
+    let Some(user_agent) = user_agent else { return };
+    let Ok(settings) = (unsafe { webview.webview().Settings() }) else { return };
+    let Ok(settings) = settings.cast::<ICoreWebView2Settings2>() else { return };
+    let _ = unsafe { settings.SetUserAgent(&HSTRING::from(user_agent)) };
+}
+
 fn make_tab(
     window: &Window,
     proxy: &EventLoopProxy<UserEvent>,
@@ -367,6 +399,7 @@ fn make_tab(
         .with_extensions_path(crate::extensions::root())
         .with_initialization_script(content_script())
         .with_initialization_script(store_identity_script)
+        .with_initialization_script(crate::store_identity::install_helper_script())
         .with_ipc_handler(move |request| {
             let _ = ipc_proxy.send_event(UserEvent::Content(id, request.body().clone()));
         })
@@ -387,7 +420,12 @@ fn make_tab(
                 return false;
             };
             directory = absolute;
-            let filename = path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("download"));
+            let store_crx = uri.contains("clients2.google.com/service/update2/crx");
+            let filename = if store_crx {
+                std::ffi::OsStr::new("extension.crx")
+            } else {
+                path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("download"))
+            };
             let mut destination = directory.join(filename);
             let stem = destination.file_stem().unwrap_or_default().to_os_string();
             let extension = destination.extension().map(|value| value.to_os_string());
@@ -697,8 +735,8 @@ impl App {
                 self.tabs.push(tab);
                 self.active = self.tabs.len() - 1;
                 let _ = self.tabs[self.active].webview.set_visible(true);
-                let _ = self.tabs[self.active].webview.focus();
                 self.sync_toolbar();
+                self.focus_active_tab();
             }
             Err(error) => eprintln!("ubar: could not create WebView2 tab: {error}"),
         }
@@ -724,8 +762,8 @@ impl App {
                 let _ = self.tabs[self.active].webview.set_bounds(content_bounds(window));
             }
             let _ = self.tabs[self.active].webview.set_visible(true);
-            let _ = self.tabs[self.active].webview.focus();
             self.sync_toolbar();
+            self.focus_active_tab();
         }
     }
 
@@ -746,8 +784,8 @@ impl App {
             let _ = self.tabs[index].webview.set_bounds(content_bounds(window));
         }
         let _ = self.tabs[index].webview.set_visible(true);
-        let _ = self.tabs[index].webview.focus();
         self.sync_toolbar();
+        self.focus_active_tab();
     }
 
     fn move_tab(&mut self, id: u64, target_id: u64, after: bool) {
@@ -796,6 +834,7 @@ impl App {
         if let Some(uri) = normalize_uri(input, &engine)
             && let Some(tab) = self.tabs.get(self.active)
         {
+            apply_site_user_agent(&tab.webview, &uri);
             let _ = tab.webview.load_url(&uri);
         }
     }
@@ -807,6 +846,22 @@ impl App {
     fn toolbar_eval(&self, script: &str) {
         if let Some(toolbar) = &self.toolbar {
             let _ = toolbar.evaluate_script(script);
+        }
+    }
+
+    fn focus_address_bar(&self) {
+        if let Some(toolbar) = &self.toolbar {
+            let _ = toolbar.focus();
+            let _ = toolbar.evaluate_script("setTimeout(() => window.ubarFocusAddress?.(), 0)");
+        }
+    }
+
+    fn focus_active_tab(&self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        if is_empty_new_tab(&tab.uri) {
+            self.focus_address_bar();
+        } else {
+            let _ = tab.webview.focus();
         }
     }
 
@@ -921,6 +976,7 @@ impl App {
         }
         if let Some(uri) = message.strip_prefix("open:") {
             let uri = percent_decode(uri);
+            apply_site_user_agent(&tab.webview, &uri);
             let _ = tab.webview.load_url(&uri);
         } else if message == "clear-history" {
             self.state.borrow_mut().clear_history();
@@ -1206,8 +1262,9 @@ document.documentElement.append(style);
                 key @ ("tab" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
                     self.switch_tab_shortcut(key, value["shift"].as_bool().unwrap_or(false));
                 }
-                "l" => self.toolbar_eval("window.ubarFocusAddress()"),
+                "l" => self.focus_address_bar(),
                 "t" => self.add_tab(self.new_tab_uri.clone()),
+                "n" if value["shift"].as_bool().unwrap_or(false) => self.open_private_window(),
                 "w" => self.close_tab(self.tabs[target].id),
                 "r" => {
                     let _ = self.tabs[target].webview.reload();
@@ -1291,6 +1348,7 @@ impl ApplicationHandler<UserEvent> for App {
             })
             .build_as_child(&window)
             .expect("create ubar toolbar");
+        remember_default_user_agent(&toolbar);
         self.window = Some(window);
         self.toolbar = Some(toolbar);
         if let Some(toolbar) = &self.toolbar {

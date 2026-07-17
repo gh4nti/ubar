@@ -106,6 +106,53 @@ pub fn navigator_override_script() -> String {
     )
 }
 
+pub fn install_helper_script() -> &'static str {
+    r#"
+document.addEventListener('DOMContentLoaded', function () {
+  function installHref() {
+    var host = location.hostname.toLowerCase();
+    if (host === 'addons.mozilla.org' || host === 'addons.mozilla.com') {
+      var link = document.querySelector('a[href*="/downloads/file/"]');
+      return link ? link.href : '';
+    } else if (host === 'chromewebstore.google.com') {
+      var match = location.pathname.match(/\/detail\/[^/]+\/([a-p]{32})/);
+      return match ? 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=152.0.0.0&acceptformat=crx3&x=id%3D' + match[1] + '%26uc' : '';
+    }
+    return '';
+  }
+
+  function updateUbarInstallButton() {
+    var href = installHref();
+    var button = document.getElementById('ubar-install');
+    if (!href) { if (button) button.remove(); return; }
+    if (!button) {
+      button = document.createElement('button');
+      button.id = 'ubar-install';
+      button.textContent = 'Install in ubar';
+      button.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;padding:12px 20px;border:0;border-radius:999px;background:#1a73e8;color:#fff;font:600 14px system-ui;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+      button.onclick = function () { location.href = button.dataset.href; };
+      document.body.appendChild(button);
+    }
+    button.dataset.href = href;
+  }
+  updateUbarInstallButton();
+  new MutationObserver(updateUbarInstallButton).observe(document.documentElement, {childList:true, subtree:true});
+
+  document.addEventListener('click', function (event) {
+    var control = event.target.closest && event.target.closest('button,[role="button"]');
+    if (!control) return;
+    var label = (control.textContent || '').trim().toLowerCase();
+    if (label.indexOf('add to chrome') < 0 && label.indexOf('add to firefox') < 0) return;
+    var href = installHref();
+    if (!href) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    location.href = href;
+  }, true);
+});
+"#
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
