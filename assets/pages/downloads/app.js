@@ -5,7 +5,6 @@ function post(message) {
 }
 
 function formatBytes(bytes) {
-  if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
@@ -24,6 +23,9 @@ window.ubarRenderDownloads = function renderDownloads(data) {
   }
 
   items.forEach((item) => {
+    const received = Number(item.received) || 0;
+    const total = Number(item.total) || 0;
+    const hasTotal = total > 0 && total >= received;
     const card = document.createElement("article");
     card.className = "row-card download-card";
 
@@ -35,7 +37,9 @@ window.ubarRenderDownloads = function renderDownloads(data) {
     status.className = `status-${item.status}`;
     status.textContent =
       item.status === "active"
-        ? `${formatBytes(item.received)}${item.total ? ` of ${formatBytes(item.total)}` : ""}`
+        ? received > 0
+          ? `${formatBytes(received)}${hasTotal ? ` of ${formatBytes(total)}` : " downloaded"}`
+          : "Starting…"
         : item.status;
     head.append(name, status);
 
@@ -49,7 +53,11 @@ window.ubarRenderDownloads = function renderDownloads(data) {
       const bar = document.createElement("div");
       bar.className = "progress";
       const fill = document.createElement("div");
-      fill.style.width = item.total ? `${Math.min(100, (item.received / item.total) * 100)}%` : "10%";
+      if (hasTotal && received > 0) {
+        fill.style.width = `${Math.min(100, (received / total) * 100)}%`;
+      } else {
+        bar.classList.add("indeterminate");
+      }
       bar.append(fill);
       card.append(bar);
     }

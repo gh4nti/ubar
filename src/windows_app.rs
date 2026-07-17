@@ -167,7 +167,7 @@ window.addEventListener('keydown', event => {
   }
   if (!event.ctrlKey) return;
   const key = event.key.toLowerCase();
-  if (['l','t','w','r','d','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)) {
+  if (['l','t','w','r','d','j','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)) {
     event.preventDefault();
     window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key,shift:event.shiftKey}));
   }
@@ -339,7 +339,7 @@ fn make_tab(
             if fs::create_dir_all(&directory).is_err() {
                 return false;
             }
-            let Ok(absolute) = directory.canonicalize() else {
+            let Ok(absolute) = dunce::canonicalize(&directory) else {
                 return false;
             };
             directory = absolute;
@@ -483,10 +483,8 @@ fn make_tab(
                     let Some(operation) = operation else { return Ok(()) };
                     let mut received = 0i64;
                     let mut total = 0i64;
-                    unsafe {
-                        operation.BytesReceived(&mut received)?;
-                        operation.TotalBytesToReceive(&mut total)?;
-                    }
+                    operation.BytesReceived(&mut received)?;
+                    operation.TotalBytesToReceive(&mut total)?;
                     let _ = progress_proxy.send_event(UserEvent::DownloadProgress(
                         id, received.max(0) as u64, total.max(0) as u64,
                     ));
@@ -495,13 +493,23 @@ fn make_tab(
                 &mut progress_token,
             )?; }
 
+            let mut received = 0i64;
+            let mut total = 0i64;
+            unsafe {
+                operation.BytesReceived(&mut received)?;
+                operation.TotalBytesToReceive(&mut total)?;
+            }
+            let _ = observed_proxy.send_event(UserEvent::DownloadProgress(
+                id, received.max(0) as u64, total.max(0) as u64,
+            ));
+
             let end_proxy = observed_proxy.clone();
             let mut state_token = 0;
             unsafe { operation.add_StateChanged(
                 &StateChangedEventHandler::create(Box::new(move |operation, _| {
                     let Some(operation) = operation else { return Ok(()) };
                     let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
-                    unsafe { operation.State(&mut state)?; }
+                    operation.State(&mut state)?;
                     if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
                         let _ = end_proxy.send_event(UserEvent::DownloadEnded(
                             id,
@@ -532,6 +540,13 @@ fn make_tab(
 }
 
 impl App {
+    fn cancel_download(&mut self, id: u64) {
+        let operation = self.download_operations.borrow().get(&id).cloned();
+        if operation.is_some_and(|operation| unsafe { operation.Cancel() }.is_ok()) {
+            self.cancel_requested.insert(id);
+        }
+    }
+
     fn request_suspend(&mut self, index: usize) {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
@@ -877,6 +892,11 @@ impl App {
             if fs::create_dir_all(&directory).is_ok() {
                 let _ = Command::new("explorer.exe").arg(directory).spawn();
             }
+        } else if let Some(id) = message
+            .strip_prefix("download-cancel:")
+            .and_then(|id| id.parse().ok())
+        {
+            self.cancel_download(id);
         } else if let Some(name) = message.strip_prefix("delete-extension:") {
             let extensions = crate::extensions::load();
             if crate::extensions::uninstall(&percent_decode(name), &extensions) {
@@ -966,11 +986,8 @@ impl App {
                 }
             }
             "download-cancel" if toolbar_request => {
-                if let Some(id) = value["id"].as_u64()
-                    && let Some(operation) = self.download_operations.borrow().get(&id).cloned()
-                    && unsafe { operation.Cancel() }.is_ok()
-                {
-                    self.cancel_requested.insert(id);
+                if let Some(id) = value["id"].as_u64() {
+                    self.cancel_download(id);
                 }
             }
             "download-open" | "download-show" if toolbar_request => {
@@ -1136,6 +1153,7 @@ document.documentElement.append(style);
                     );
                     self.sync_toolbar();
                 }
+                "j" => self.toolbar_eval("window.ubarShowDownloads?.()"),
                 "+" | "=" => self.zoom_in(),
                 "-" => self.zoom_out(),
                 "0" => self.set_zoom(crate::zoom::DEFAULT_ZOOM),
@@ -1413,8 +1431,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(entry) = self.state.borrow_mut().download_mut(id)
                     && entry.status == "active"
                 {
-                    entry.received = received;
-                    entry.total = total;
+                    entry.received = entry.received.max(received);
+                    if total >= entry.received {
+                        entry.total = total;
+                    }
                 }
                 let pages = self.tabs.iter()
                     .filter(|tab| tab.uri.contains("/pages/downloads/"))

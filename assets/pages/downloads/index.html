@@ -13,6 +13,8 @@
     .download-actions { display: flex; gap: 8px; }
     .progress { height: 6px; border-radius: 999px; background: #eef2f6; overflow: hidden; }
     .progress > div { height: 100%; background: #101828; transition: width 200ms linear; }
+    .progress.indeterminate > div { width: 35%; animation: download-progress 1s ease-in-out infinite alternate; }
+    @keyframes download-progress { from { transform: translateX(-100%); } to { transform: translateX(286%); } }
     .status-done { color: #027a48; font-weight: 600; }
     .status-failed, .status-cancelled { color: #b42318; font-weight: 600; }
     .status-active { color: #175cd3; font-weight: 600; }

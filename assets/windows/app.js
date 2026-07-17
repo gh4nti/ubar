@@ -1,4 +1,9 @@
 const send = (message) => window.ipc.postMessage(JSON.stringify(message));
+const formatBytes = bytes => {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** unit).toFixed(unit ? 1 : 0)} ${units[unit]}`;
+};
 const tabs = document.getElementById('tab-strip');
 const add = document.getElementById('new');
 const dragRegion = document.getElementById('drag-region');
@@ -25,6 +30,13 @@ const hideDownloads = () => {
   downloadButton.setAttribute('aria-expanded', 'false');
   send({cmd: 'menu-close'});
 };
+window.ubarShowDownloads = () => {
+  hideMenu();
+  downloadPanel.hidden = false;
+  downloadButton.classList.add('active');
+  downloadButton.setAttribute('aria-expanded', 'true');
+  send({cmd: 'menu-open'});
+};
 const toggleMenu = () => {
   menu.hidden = !menu.hidden;
   more.classList.toggle('active', !menu.hidden);
@@ -48,11 +60,7 @@ more.addEventListener('click', event => {
 downloadButton.addEventListener('click', event => {
   event.stopPropagation();
   if (downloadPanel.hidden) {
-    hideMenu();
-    downloadPanel.hidden = false;
-    downloadButton.classList.add('active');
-    downloadButton.setAttribute('aria-expanded', 'true');
-    send({cmd: 'menu-open'});
+    window.ubarShowDownloads();
   } else {
     hideDownloads();
   }
@@ -92,6 +100,7 @@ window.addEventListener('keydown', event => {
   const commands = {
     l: () => window.ubarFocusAddress(),
     t: () => send({cmd: 'new-tab'}),
+    j: () => send({cmd: 'shortcut', key: 'j'}),
     '+': () => send({cmd: 'zoom-in'}),
     '=': () => send({cmd: 'zoom-in'}),
     '-': () => send({cmd: 'zoom-out'}),
@@ -188,16 +197,21 @@ window.ubarRenderDownloads = items => {
     name.title = name.textContent;
     const status = document.createElement('div');
     status.className = 'download-state';
-    if (item.status === 'active' && item.total > 0) {
-      const percent = Math.min(100, Math.round(item.received * 100 / item.total));
-      status.textContent = `${percent}%`;
+    const received = Number(item.received) || 0;
+    const total = Number(item.total) || 0;
+    const hasTotal = total > 0 && total >= received;
+    if (item.status === 'active') {
       const progress = document.createElement('progress');
-      progress.max = item.total;
-      progress.value = item.received;
+      if (hasTotal && received > 0) {
+        progress.max = total;
+        progress.value = received;
+      }
+      status.textContent = received > 0
+        ? `${formatBytes(received)}${hasTotal ? ` of ${formatBytes(total)}` : ' downloaded'}`
+        : 'Starting…';
       status.prepend(progress);
     } else {
-      status.textContent = item.status === 'active' ? 'Downloading' :
-        item.status === 'done' ? 'Complete' : item.status;
+      status.textContent = item.status === 'done' ? 'Complete' : item.status;
     }
     const actions = document.createElement('div');
     actions.className = 'download-actions';

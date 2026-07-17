@@ -1120,7 +1120,9 @@ fn refresh_downloads_pages(app: &Rc<AppState>) {
         card.append(&title);
 
         let details = if entry.status == "active" {
-            if entry.total > 0 {
+            if entry.received == 0 {
+                "Starting…".into()
+            } else if entry.total >= entry.received {
                 format!("{} of {}", format_bytes(entry.received), format_bytes(entry.total))
             } else {
                 format!("{} downloaded", format_bytes(entry.received))
@@ -1134,7 +1136,7 @@ fn refresh_downloads_pages(app: &Rc<AppState>) {
         card.append(&status);
 
         if entry.status == "active" {
-            if entry.total > 0 {
+            if entry.received > 0 && entry.total >= entry.received {
                 let progress = ProgressBar::new();
                 progress.set_fraction((entry.received as f64 / entry.total as f64).clamp(0.0, 1.0));
                 card.append(&progress);
@@ -2642,7 +2644,7 @@ pub fn run() {
                     glib::Propagation::Proceed
                 }
                 gdk::Key::j | gdk::Key::J => {
-                    load_uri_in_current_tab(&app_keys, &app_keys.downloads_uri);
+                    app_keys.download_button.popup();
                     glib::Propagation::Stop
                 }
                 gdk::Key::r | gdk::Key::R => {

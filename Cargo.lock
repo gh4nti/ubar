@@ -3453,6 +3453,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dirs",
+ "dunce",
  "glib 0.22.8",
  "gtk4",
  "serde",
