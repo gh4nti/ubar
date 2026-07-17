@@ -12,6 +12,17 @@ body {
   font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
 }
 
+:root {
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #111318;
+    color: #f1f3f4;
+  }
+}
+
 .wrap {
   text-align: center;
 }
