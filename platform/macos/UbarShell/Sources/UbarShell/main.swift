@@ -2,6 +2,10 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Notification.Name {
+    static let openBrowserManager = Notification.Name("openBrowserManager")
+}
+
 @main
 struct UbarApp: App {
     @State private var privateMode = CommandLine.arguments.contains("--incognito")
@@ -12,7 +16,23 @@ struct UbarApp: App {
                 .frame(minWidth: 900, minHeight: 620)
         }
         .windowStyle(.hiddenTitleBar)
-        .commands { CommandGroup(replacing: .newItem) {} }
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+            CommandMenu("Browser") {
+                Button("History") { openManager("history") }
+                    .keyboardShortcut("y", modifiers: .command)
+                Button("Settings") { openManager("settings") }
+                    .keyboardShortcut(",", modifiers: .command)
+                Button("Bookmarks") { openManager("bookmarks") }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                Button("Extensions") { openManager("extensions") }
+                    .keyboardShortcut("x", modifiers: [.command, .shift])
+            }
+        }
+    }
+
+    private func openManager(_ manager: String) {
+        NotificationCenter.default.post(name: .openBrowserManager, object: manager)
     }
 }
 
@@ -85,6 +105,10 @@ struct BrowserWindow: View {
             selection = selection ?? tabs.first?.id
             extensionActions = engine.extensionActions
             engine.onEvent = handleEngineEvent
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openBrowserManager)) { notification in
+            guard let manager = notification.object as? String else { return }
+            extensionMessage = engine.managerSummary(manager)
         }
         .fileImporter(
             isPresented: $choosingExtension,

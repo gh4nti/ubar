@@ -2668,7 +2668,31 @@ pub fn run() {
                     glib::Propagation::Stop
                 }
                 gdk::Key::h | gdk::Key::H => {
+                    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        return glib::Propagation::Proceed;
+                    }
                     load_uri_in_current_tab(&app_keys, &app_keys.history_uri);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::comma => {
+                    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        return glib::Propagation::Proceed;
+                    }
+                    load_uri_in_current_tab(&app_keys, &app_keys.settings_uri);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::o | gdk::Key::O => {
+                    if !state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        return glib::Propagation::Proceed;
+                    }
+                    load_uri_in_current_tab(&app_keys, &app_keys.bookmarks_uri);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::x | gdk::Key::X => {
+                    if !state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        return glib::Propagation::Proceed;
+                    }
+                    load_uri_in_current_tab(&app_keys, &app_keys.extensions_uri);
                     glib::Propagation::Stop
                 }
                 gdk::Key::f | gdk::Key::F => {

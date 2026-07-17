@@ -20,7 +20,7 @@ use webview2_com::{
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId};
+use winit::window::{ResizeDirection, Window, WindowId};
 use windows::core::{Interface, PCWSTR, PWSTR, w};
 use windows::Win32::{
     Foundation::HWND,
@@ -167,11 +167,50 @@ window.addEventListener('keydown', event => {
   }
   if (!event.ctrlKey) return;
   const key = event.key.toLowerCase();
-  if (['l','t','w','r','d','j','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)) {
+  if (['l','t','w','r','d','j','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)
+      || (!event.shiftKey && ['h',','].includes(key))
+      || (event.shiftKey && ['o','x'].includes(key))) {
     event.preventDefault();
     window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key,shift:event.shiftKey}));
   }
 }, true);
+{
+const ubarResizeDirection = (event, top, bottom) => {
+  const edge = 6;
+  const left = event.clientX < edge;
+  const right = event.clientX >= innerWidth - edge;
+  const north = top && event.clientY < edge;
+  const south = bottom && event.clientY >= innerHeight - edge;
+  return north ? (left ? 'nw' : right ? 'ne' : 'n')
+    : south ? (left ? 'sw' : right ? 'se' : 's')
+    : left ? 'w' : right ? 'e' : '';
+};
+const ubarResizeCursor = {n:'ns-resize',s:'ns-resize',e:'ew-resize',w:'ew-resize',nw:'nwse-resize',se:'nwse-resize',ne:'nesw-resize',sw:'nesw-resize'};
+window.addEventListener('pointermove', event => {
+  const direction = ubarResizeDirection(event, false, true);
+  if (direction) {
+    if (!document.getElementById('ubar-resize-cursor')) {
+      const style = document.createElement('style');
+      style.id = 'ubar-resize-cursor';
+      style.textContent = 'html[data-ubar-resize] *{cursor:var(--ubar-resize-cursor)!important}';
+      document.head.append(style);
+    }
+    document.documentElement.dataset.ubarResize = direction;
+    document.documentElement.style.setProperty('--ubar-resize-cursor', ubarResizeCursor[direction]);
+  } else if (document.documentElement.dataset.ubarResize) {
+    delete document.documentElement.dataset.ubarResize;
+    document.documentElement.style.removeProperty('--ubar-resize-cursor');
+  }
+}, true);
+window.addEventListener('pointerdown', event => {
+  if (event.button !== 0) return;
+  const direction = ubarResizeDirection(event, false, true);
+  if (!direction) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  window.ipc.postMessage(JSON.stringify({cmd:'window-resize',value:direction}));
+}, true);
+}
 window.webkit = window.webkit || {};
 window.webkit.messageHandlers = window.webkit.messageHandlers || {};
 window.webkit.messageHandlers.ubar = {
@@ -244,11 +283,12 @@ fn toolbar_bounds(window: &Window, menu_open: bool) -> Rect {
         position: LogicalPosition::new(0.0, 0.0).into(),
         size: LogicalSize::new(
             size.width,
-            if menu_open {
+            (if menu_open {
                 TOOLBAR_HEIGHT + MENU_OVERLAY_HEIGHT
             } else {
                 TOOLBAR_HEIGHT
-            },
+            })
+            .min(size.height.max(0.0)),
         )
         .into(),
     }
@@ -259,7 +299,11 @@ fn content_bounds(window: &Window) -> Rect {
     let size = window.inner_size().to_logical::<f64>(scale);
     Rect {
         position: LogicalPosition::new(0.0, TOOLBAR_HEIGHT).into(),
-        size: LogicalSize::new(size.width, (size.height - TOOLBAR_HEIGHT).max(0.0)).into(),
+        size: LogicalSize::new(
+            size.width,
+            (size.height - TOOLBAR_HEIGHT).max(0.0),
+        )
+        .into(),
     }
 }
 
@@ -1070,6 +1114,24 @@ document.documentElement.append(style);
                     let _ = window.drag_window();
                 }
             }
+            "window-resize" => {
+                let direction = match value["value"].as_str() {
+                    Some("n") => Some(ResizeDirection::North),
+                    Some("s") => Some(ResizeDirection::South),
+                    Some("e") => Some(ResizeDirection::East),
+                    Some("w") => Some(ResizeDirection::West),
+                    Some("ne") => Some(ResizeDirection::NorthEast),
+                    Some("nw") => Some(ResizeDirection::NorthWest),
+                    Some("se") => Some(ResizeDirection::SouthEast),
+                    Some("sw") => Some(ResizeDirection::SouthWest),
+                    _ => None,
+                };
+                if let (Some(window), Some(direction)) = (&self.window, direction)
+                    && !window.is_maximized()
+                {
+                    let _ = window.drag_resize_window(direction);
+                }
+            }
             "window-minimize" => {
                 if let Some(window) = &self.window {
                     window.set_minimized(true);
@@ -1154,6 +1216,18 @@ document.documentElement.append(style);
                     self.sync_toolbar();
                 }
                 "j" => self.toolbar_eval("window.ubarShowDownloads?.()"),
+                "h" if !value["shift"].as_bool().unwrap_or(false) => {
+                    self.open_internal_page(HISTORY_URI);
+                }
+                "," if !value["shift"].as_bool().unwrap_or(false) => {
+                    self.open_internal_page(SETTINGS_URI);
+                }
+                "o" if value["shift"].as_bool().unwrap_or(false) => {
+                    self.open_internal_page(BOOKMARKS_URI);
+                }
+                "x" if value["shift"].as_bool().unwrap_or(false) => {
+                    self.open_internal_page(EXTENSIONS_URI);
+                }
                 "+" | "=" => self.zoom_in(),
                 "-" => self.zoom_out(),
                 "0" => self.set_zoom(crate::zoom::DEFAULT_ZOOM),

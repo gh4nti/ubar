@@ -130,6 +130,32 @@ final class EngineBridge {
         return "Bookmarks\n\(bookmarkLines.isEmpty ? "None" : bookmarkLines)\n\nRecent history\n\(historyLines.isEmpty ? "None" : historyLines)"
     }
 
+    func managerSummary(_ manager: String) -> String {
+        switch manager {
+        case "history":
+            let items: [ShellHistory] = browserControl(
+                ["method": "queryHistory", "limit": 100], as: [ShellHistory].self) ?? []
+            let lines = items.map { "• \($0.title) — \($0.url)" }.joined(separator: "\n")
+            return "History\n\(lines.isEmpty ? "No history yet." : lines)"
+        case "bookmarks":
+            let items: [ShellBookmark] = browserControl(
+                ["method": "listBookmarks"], as: [ShellBookmark].self) ?? []
+            let lines = items.map { "★ \($0.title) — \($0.url)" }.joined(separator: "\n")
+            return "Bookmarks\n\(lines.isEmpty ? "No bookmarks yet." : lines)"
+        case "extensions":
+            let lines = extensionActions.map { "• \($0.title)" }.joined(separator: "\n")
+            return "Extensions\n\(lines.isEmpty ? "No extensions installed." : lines)"
+        case "settings":
+            let settings: [String: JSONValue] = browserControl(
+                ["method": "getSettings"], as: [String: JSONValue].self) ?? [:]
+            let lines = settings.sorted { $0.key < $1.key }
+                .map { "\($0.key): \($0.value.description)" }.joined(separator: "\n")
+            return "Settings\n\(lines.isEmpty ? "Using defaults." : lines)"
+        default:
+            return "Unknown browser manager."
+        }
+    }
+
     private func browserControl<T: Decodable>(_ request: [String: Any], as type: T.Type) -> T? {
         guard let handle,
               let data = try? JSONSerialization.data(withJSONObject: request),
@@ -176,3 +202,28 @@ private struct ShellBrowserAck: Decodable { let id: String }
 private struct ShellBookmark: Decodable { let title: String; let url: String }
 private struct ShellHistory: Decodable { let title: String; let url: String }
 private struct ShellMemoryReport: Decodable { let residentBytes: UInt64; let hibernated: Int }
+
+private enum JSONValue: Decodable, CustomStringConvertible {
+    case string(String), number(Double), boolean(Bool), object, array, null
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let item = try? value.decode(String.self) { self = .string(item) }
+        else if let item = try? value.decode(Bool.self) { self = .boolean(item) }
+        else if let item = try? value.decode(Double.self) { self = .number(item) }
+        else if (try? value.decode([String: JSONValue].self)) != nil { self = .object }
+        else { self = .array }
+    }
+
+    var description: String {
+        switch self {
+        case .string(let value): value
+        case .number(let value): String(value)
+        case .boolean(let value): String(value)
+        case .object: "{...}"
+        case .array: "[...]"
+        case .null: "null"
+        }
+    }
+}

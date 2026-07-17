@@ -85,6 +85,27 @@ dragRegion.addEventListener('pointerdown', event => {
   if (event.button === 0) send({cmd: 'window-drag'});
 });
 dragRegion.addEventListener('dblclick', () => send({cmd: 'window-maximize'}));
+const resizeDirection = event => {
+  const edge = 6;
+  const left = event.clientX < edge;
+  const right = event.clientX >= innerWidth - edge;
+  const top = event.clientY < edge;
+  return top ? (left ? 'nw' : right ? 'ne' : 'n') : left ? 'w' : right ? 'e' : '';
+};
+const resizeCursor = {n:'ns-resize',e:'ew-resize',w:'ew-resize',nw:'nwse-resize',ne:'nesw-resize'};
+window.addEventListener('pointermove', event => {
+  const direction = resizeDirection(event);
+  document.documentElement.toggleAttribute('data-ubar-resize', !!direction);
+  document.documentElement.style.setProperty('--ubar-resize-cursor', resizeCursor[direction] || '');
+});
+window.addEventListener('pointerdown', event => {
+  if (event.button !== 0) return;
+  const direction = resizeDirection(event);
+  if (!direction) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  send({cmd: 'window-resize', value: direction});
+}, true);
 window.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     hideMenu();
@@ -101,13 +122,18 @@ window.addEventListener('keydown', event => {
     l: () => window.ubarFocusAddress(),
     t: () => send({cmd: 'new-tab'}),
     j: () => send({cmd: 'shortcut', key: 'j'}),
+    h: () => send({cmd: 'shortcut', key: 'h'}),
+    ',': () => send({cmd: 'shortcut', key: ','}),
+    o: () => send({cmd: 'shortcut', key: 'o', shift: true}),
+    x: () => send({cmd: 'shortcut', key: 'x', shift: true}),
     '+': () => send({cmd: 'zoom-in'}),
     '=': () => send({cmd: 'zoom-in'}),
     '-': () => send({cmd: 'zoom-out'}),
     '0': () => send({cmd: 'zoom-reset'}),
   };
   const command = commands[event.key.toLowerCase()];
-  if (command) {
+  const internalKey = ['h', ',', 'o', 'x'].includes(key);
+  if (command && (!internalKey || event.shiftKey === ['o', 'x'].includes(key))) {
     event.preventDefault();
     command();
   }

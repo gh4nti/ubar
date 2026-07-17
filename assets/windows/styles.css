@@ -1,5 +1,6 @@
 :root { color-scheme: light dark; font: 13px "Segoe UI", sans-serif; }
 * { box-sizing: border-box; }
+html[data-ubar-resize] * { cursor: var(--ubar-resize-cursor) !important; }
 body { position: relative; margin: 0; overflow: hidden; background: transparent; color: #eee; }
 #tabs, #nav { display: flex; align-items: center; gap: 4px; padding: 4px 6px; }
 #tabs { height: 36px; padding: 0 0 0 6px; background: #202124; }
