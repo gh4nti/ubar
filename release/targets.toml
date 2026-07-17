@@ -1,0 +1,50 @@
+schema = 1
+
+[[target]]
+triple = "x86_64-pc-windows-msvc"
+shell = "winui3"
+package = "msix"
+renderer = "webkit-wincairo"
+runner = ["self-hosted", "windows", "x64", "ubar-webkit"]
+
+[[target]]
+triple = "aarch64-pc-windows-msvc"
+shell = "winui3"
+package = "msix"
+renderer = "webkit-wincairo-arm64"
+runner = ["self-hosted", "windows", "arm64", "ubar-webkit"]
+
+[[target]]
+triple = "x86_64-apple-darwin"
+shell = "swiftui"
+package = "dmg"
+renderer = "webkit-cocoa"
+runner = ["self-hosted", "macos", "x64", "ubar-webkit"]
+
+[[target]]
+triple = "aarch64-apple-darwin"
+shell = "swiftui"
+package = "dmg"
+renderer = "webkit-cocoa"
+runner = ["self-hosted", "macos", "arm64", "ubar-webkit"]
+
+[[target]]
+triple = "universal-apple-darwin"
+shell = "swiftui"
+package = "dmg"
+renderer = "webkit-cocoa-universal"
+runner = ["self-hosted", "macos", "arm64", "ubar-webkit"]
+
+[[target]]
+triple = "x86_64-unknown-linux-gnu"
+shell = "gtk3"
+package = "appimage,flatpak,deb,rpm"
+renderer = "webkitgtk-4.1"
+runner = ["self-hosted", "linux", "x64", "ubar-webkit"]
+
+[[target]]
+triple = "aarch64-unknown-linux-gnu"
+shell = "gtk3"
+package = "appimage,flatpak,deb,rpm"
+renderer = "webkitgtk-4.1"
+runner = ["self-hosted", "linux", "arm64", "ubar-webkit"]

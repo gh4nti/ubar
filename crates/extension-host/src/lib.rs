@@ -12,6 +12,11 @@ pub mod manifest;
 pub mod package;
 pub mod worlds;
 pub mod dnr;
+pub mod catalog;
+pub mod assets;
+pub mod store;
+pub mod execution;
+pub mod bridge;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum ApiMemberKind {

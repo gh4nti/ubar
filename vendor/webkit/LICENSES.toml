@@ -1,0 +1,15 @@
+schema = 1
+source = "vendor/webkit/src/.ubar-license-files"
+policy = "Every upstream COPYING* and LICENSE* file is inventoried after fetch; release builds retain upstream notices."
+
+[[project_license]]
+component = "WebCore"
+paths = ["Source/WebCore/LICENSE-APPLE", "Source/WebCore/LICENSE-LGPL-2"]
+
+[[project_license]]
+component = "JavaScriptCore"
+paths = ["Source/JavaScriptCore/COPYING.LIB"]
+
+[[project_license]]
+component = "WTF"
+paths = ["Source/WTF/COPYING.LIB"]

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dev.ghanti.ubar/schemas/certification-harness-v1.json",
+  "title": "uBar hardware certification harness result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "target", "hardware", "security", "performance", "media"],
+  "properties": {
+    "schema": {"const": 1},
+    "target": {"type": "string"},
+    "hardware": {
+      "type": "object",
+      "required": ["ram_bytes", "cpu", "gpu", "gpu_driver"],
+      "properties": {
+        "ram_bytes": {"type": "integer", "minimum": 268435456},
+        "cpu": {"type": "string", "minLength": 1},
+        "gpu": {"type": "string", "minLength": 1},
+        "gpu_driver": {"type": "string", "minLength": 1}
+      }
+    },
+    "security": {
+      "type": "object",
+      "required": ["renderer_escape", "cross_site_storage", "private_persistence", "privileged_ipc"],
+      "properties": {
+        "renderer_escape": {"const": "blocked"},
+        "cross_site_storage": {"const": "isolated"},
+        "private_persistence": {"const": "none"},
+        "privileged_ipc": {"const": "authenticated"}
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": ["five_tab_rss_bytes"],
+      "properties": {"five_tab_rss_bytes": {"type": "integer", "maximum": 1073741824}}
+    },
+    "media": {
+      "type": "object",
+      "required": ["youtube_720p_average_fps", "youtube_720p_dropped_frames_percent", "hardware_decode"],
+      "properties": {
+        "youtube_720p_average_fps": {"type": "number", "minimum": 24},
+        "youtube_720p_dropped_frames_percent": {"type": "number", "maximum": 10},
+        "hardware_decode": {"type": "boolean"}
+      }
+    }
+  }
+}

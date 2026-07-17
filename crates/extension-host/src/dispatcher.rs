@@ -13,6 +13,8 @@ pub struct ApiRequest {
     pub member: String,
     #[serde(default)]
     pub arguments: Value,
+    #[serde(default)]
+    pub user_gesture: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +49,7 @@ impl ApiError {
 #[derive(Clone, Debug)]
 pub struct InstalledExtension {
     pub id: ExtensionId,
+    pub profile: ProfileScope,
     pub base_url: String,
     pub manifest: Value,
     pub permissions: BTreeSet<String>,
@@ -94,7 +97,7 @@ pub struct ExtensionDispatcher<B> {
     pub browser: B,
     pub messages: MessageBus,
     pub storage: StorageService,
-    extensions: BTreeMap<ExtensionId, InstalledExtension>,
+    extensions: BTreeMap<(ExtensionId, ProfileScope), InstalledExtension>,
 }
 
 impl<B: BrowserProvider> ExtensionDispatcher<B> {
@@ -108,11 +111,11 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
     }
 
     pub fn install(&mut self, extension: InstalledExtension) {
-        self.extensions.insert(extension.id.clone(), extension);
+        self.extensions.insert((extension.id.clone(), extension.profile), extension);
     }
 
-    pub fn uninstall(&mut self, id: &ExtensionId) {
-        self.extensions.remove(id);
+    pub fn uninstall(&mut self, id: &ExtensionId, profile: ProfileScope) {
+        self.extensions.remove(&(id.clone(), profile));
     }
 
     pub fn dispatch(&mut self, request: ApiRequest) -> ApiResponse {
@@ -123,7 +126,7 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
     fn dispatch_inner(&mut self, request: &ApiRequest) -> Result<Value, ApiError> {
         let extension = self
             .extensions
-            .get(&request.context.extension)
+            .get(&(request.context.extension.clone(), request.context.profile))
             .cloned()
             .ok_or_else(|| ApiError::denied("extension is not installed"))?;
         match (request.namespace.as_str(), request.member.as_str()) {
@@ -143,6 +146,13 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
                     .and_then(Value::as_str)
                     .map(|value| ExtensionId(value.into()))
                     .unwrap_or_else(|| extension.id.clone());
+                if recipient != extension.id {
+                    let target = self.extensions.get(&(recipient.clone(), request.context.profile))
+                        .ok_or_else(|| ApiError::invalid("receiving extension is not installed"))?;
+                    if !accepts_external_message(&target.manifest, &extension.id) {
+                        return Err(ApiError::denied("receiving extension does not accept this sender"));
+                    }
+                }
                 let payload = request.arguments.get("message").cloned().unwrap_or(Value::Null);
                 let id = self
                     .messages
@@ -153,11 +163,15 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
             ("runtime", "connect") => {
                 let recipient = request.arguments.get("extensionId").and_then(Value::as_str)
                     .map(|value| ExtensionId(value.into())).unwrap_or_else(|| extension.id.clone());
-                let target = self.messages.context_for_extension(
-                    &recipient, request.context.profile, Some(&request.context),
-                ).ok_or_else(|| ApiError::invalid("receiving extension has no live context"))?;
+                if recipient != extension.id {
+                    let target = self.extensions.get(&(recipient.clone(), request.context.profile))
+                        .ok_or_else(|| ApiError::invalid("receiving extension is not installed"))?;
+                    if !accepts_external_message(&target.manifest, &extension.id) {
+                        return Err(ApiError::denied("receiving extension does not accept this sender"));
+                    }
+                }
                 let name = request.arguments.get("name").and_then(Value::as_str).unwrap_or_default();
-                let port = self.messages.connect(&request.context, &target, name)
+                let port = self.messages.connect_extension(&request.context, recipient, name)
                     .map_err(ApiError::invalid)?;
                 Ok(json!({"portId": port}))
             }
@@ -220,6 +234,15 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
                     .tabs_remove(request.context.profile, &ids)
                     .map_err(ApiError::invalid)?;
                 Ok(Value::Null)
+            }
+            ("tabs", "sendMessage") => {
+                let tab_id = request.arguments.get("tabId").and_then(Value::as_u64)
+                    .ok_or_else(|| ApiError::invalid("tabs.sendMessage requires tabId"))?;
+                let frame_id = request.arguments.get("frameId").and_then(Value::as_u64);
+                let payload = request.arguments.get("message").cloned().unwrap_or(Value::Null);
+                let id = self.messages.send_tab_message(&request.context, tab_id, frame_id, payload)
+                    .map_err(ApiError::invalid)?;
+                Ok(json!({"requestId": id}))
             }
             (namespace, member) if provider_member(namespace, member) => {
                 if let Some(permission) = provider_permission(namespace) {
@@ -296,7 +319,9 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
     }
 
     fn dispatch_permissions(&mut self, request: &ApiRequest) -> Result<Value, ApiError> {
-        let extension = self.extensions.get_mut(&request.context.extension)
+        let extension = self.extensions.get_mut(&(
+            request.context.extension.clone(), request.context.profile,
+        ))
             .ok_or_else(|| ApiError::denied("extension is not installed"))?;
         let required = manifest_permissions(&extension.manifest, "permissions");
         let optional = manifest_permissions(&extension.manifest, "optional_permissions");
@@ -311,8 +336,14 @@ impl<B: BrowserProvider> ExtensionDispatcher<B> {
                 Ok(json!(requested.iter().all(|item| extension.permissions.contains(item))))
             }
             "request" => {
+                if !request.user_gesture {
+                    return Err(ApiError::denied("permissions.request requires a user gesture"));
+                }
                 let requested = requested_permissions(&request.arguments);
-                if !requested.iter().all(|item| required.contains(item) || optional.contains(item)) {
+                let optional_origins = manifest_permissions(&extension.manifest, "optional_host_permissions");
+                if !requested.iter().all(|item| required.contains(item) || optional.contains(item)
+                    || optional_origins.contains(item))
+                {
                     return Err(ApiError::denied("permission was not declared in the manifest"));
                 }
                 extension.permissions.extend(requested);
@@ -378,7 +409,7 @@ fn provider_permission(namespace: &str) -> Option<&'static str> {
     match namespace {
         "bookmarks" | "history" | "cookies" | "downloads" | "sessions"
         | "browsingData" | "webNavigation" | "notifications" | "management"
-        | "contextualIdentities" | "declarativeNetRequest" | "webRequest" => Some(namespace),
+        | "contextualIdentities" | "declarativeNetRequest" | "webRequest" | "scripting" => Some(namespace),
         _ => None,
     }
 }
@@ -402,6 +433,13 @@ fn provider_member(namespace: &str, member: &str) -> bool {
         "topSites" => member == "get",
         "search" => matches!(member, "get" | "search"),
         "idle" => matches!(member, "queryState" | "setDetectionInterval"),
+        "scripting" => matches!(member, "executeScript" | "insertCSS" | "removeCSS" | "registerContentScripts" | "unregisterContentScripts" | "getRegisteredContentScripts" | "updateContentScripts"),
         _ => false,
     }
+}
+
+fn accepts_external_message(manifest: &Value, sender: &ExtensionId) -> bool {
+    manifest.pointer("/externally_connectable/ids").and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().filter_map(Value::as_str)
+            .any(|id| id == "*" || id == sender.0))
 }

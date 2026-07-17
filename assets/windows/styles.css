@@ -22,6 +22,7 @@ button:hover, button.active { background: #ffffff18; }
 #address { flex: 1; height: 34px; padding: 0 12px; background: #303134; color: inherit; outline: none; }
 #address:focus { box-shadow: 0 0 0 2px #8ab4f8; }
 #bookmark.active { color: #fbbc04; }
+#downloads { width: 32px; min-width: 32px; font-size: 18px; }
 #extension-actions { display: flex; gap: 2px; }
 .extension-action { width: 28px; min-width: 28px; font-weight: 700; }
 #app-menu {
@@ -40,6 +41,29 @@ button:hover, button.active { background: #ffffff18; }
   box-shadow: 0 8px 24px #0008;
 }
 #app-menu[hidden] { display: none; }
+#downloads-panel {
+  position: absolute;
+  top: 78px;
+  right: 42px;
+  z-index: 11;
+  width: 360px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid #ffffff22;
+  border-radius: 10px;
+  background: #292a2d;
+  box-shadow: 0 8px 24px #0008;
+}
+#downloads-panel[hidden] { display: none; }
+.downloads-header { padding: 2px 4px 10px; font-size: 15px; font-weight: 600; }
+.download-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 9px 4px; border-top: 1px solid #ffffff18; }
+.download-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.download-state { display: flex; align-items: center; gap: 6px; color: #aaa; font-size: 12px; }
+.download-state progress { width: 110px; height: 6px; }
+.download-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 3px; }
+.download-actions button, #downloads-all { height: 26px; padding: 0 8px; background: #ffffff10; }
+#downloads-all { width: 100%; margin-top: 8px; }
 #app-menu button {
   width: 100%;
   height: 30px;
@@ -56,4 +80,5 @@ button:hover, button.active { background: #ffffff18; }
   .tab, #address { background: #fff; }
   .tab.active { background: #dfe1e5; }
   #app-menu { background: #fff; border-color: #00000020; box-shadow: 0 8px 24px #0003; }
+  #downloads-panel { background: #fff; border-color: #00000020; box-shadow: 0 8px 24px #0003; }
 }

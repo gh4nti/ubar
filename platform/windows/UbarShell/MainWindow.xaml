@@ -7,13 +7,20 @@
   <Grid RowDefinitions="Auto,*" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
     <Border Grid.Row="0" Margin="12" Padding="8" CornerRadius="18"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" ColumnSpacing="8">
+      <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
         <Button Grid.Column="0" Content="←" AutomationProperties.Name="Back" Click="Back_Click" />
         <Button Grid.Column="1" Content="→" AutomationProperties.Name="Forward" Click="Forward_Click" />
-        <AutoSuggestBox x:Name="Address" Grid.Column="2" PlaceholderText="Search or enter address"
+        <Button Grid.Column="2" Content="↻" AutomationProperties.Name="Reload" Click="Reload_Click" />
+        <AutoSuggestBox x:Name="Address" Grid.Column="3" PlaceholderText="Search or enter address"
                         QuerySubmitted="Address_QuerySubmitted" AutomationProperties.Name="Address" />
-        <Button Grid.Column="3" Content="Private" Click="Private_Click" />
-        <Button Grid.Column="4" Content="⋯" AutomationProperties.Name="Browser menu" />
+        <Button Grid.Column="4" Content="★" AutomationProperties.Name="Bookmark" Click="Bookmark_Click" />
+        <Button Grid.Column="5" Content="Library" Click="Library_Click" />
+        <StackPanel x:Name="ExtensionActions" Grid.Column="6" Orientation="Horizontal" Spacing="4" />
+        <Button Grid.Column="7" Content="−" AutomationProperties.Name="Zoom out" Click="ZoomOut_Click" />
+        <Button Grid.Column="8" Content="+" AutomationProperties.Name="Zoom in" Click="ZoomIn_Click" />
+        <Button x:Name="PrivateButton" Grid.Column="9" Content="Private" Click="Private_Click" />
+        <Button Grid.Column="10" Content="Extensions +" Click="InstallExtension_Click"
+                AutomationProperties.Name="Install extension" />
       </Grid>
     </Border>
     <controls:TabView x:Name="Tabs" Grid.Row="1" Margin="8,0,8,8"

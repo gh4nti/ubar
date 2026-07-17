@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+directory="$(CDPATH= cd -- "$(dirname -- "$0")/../lib/ubar" && pwd)"
+export LD_LIBRARY_PATH="$directory${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$directory/ubar-gtk3-shell" "$@"

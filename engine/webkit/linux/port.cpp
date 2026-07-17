@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -25,7 +26,69 @@ struct ViewState {
     WebKitWebView* web_view {};
     UbarCallbacksV1 callbacks {};
     std::string default_user_agent;
+    std::unordered_set<std::string> bridge_worlds;
+    GtkWidget* headless_window {};
 };
+
+struct DownloadState {
+    uint64_t view {};
+    std::string directory;
+    std::string path;
+    bool extension_package {};
+};
+
+bool is_extension_package_mime(const gchar* mime_type) {
+    return mime_type
+        && (!g_ascii_strcasecmp(mime_type, "application/x-xpinstall")
+            || !g_ascii_strcasecmp(mime_type, "application/x-chrome-extension"));
+}
+
+std::string safe_download_filename(const gchar* suggested_filename) {
+    gchar* basename = g_path_get_basename(
+        suggested_filename && *suggested_filename ? suggested_filename : "download");
+    std::string filename = basename ? basename : "download";
+    g_free(basename);
+
+    for (char& character : filename) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte < 0x20 || character == '/' || character == '\\' || character == ':'
+            || character == '*' || character == '?' || character == '"'
+            || character == '<' || character == '>' || character == '|') {
+            character = '_';
+        }
+    }
+    while (!filename.empty() && (filename.back() == '.' || filename.back() == ' '))
+        filename.pop_back();
+    if (filename.empty() || filename == "." || filename == "..")
+        filename = "download";
+    return filename;
+}
+
+std::string collision_safe_download_path(
+    const std::string& directory,
+    const std::string& filename) {
+    auto build = [&directory](const std::string& leaf) {
+        gchar* path = g_build_filename(directory.c_str(), leaf.c_str(), nullptr);
+        std::string result = path ? path : leaf;
+        g_free(path);
+        return result;
+    };
+
+    std::string candidate = build(filename);
+    if (!g_file_test(candidate.c_str(), G_FILE_TEST_EXISTS))
+        return candidate;
+
+    const auto dot = filename.find_last_of('.');
+    const bool has_extension = dot != std::string::npos && dot != 0;
+    const std::string stem = has_extension ? filename.substr(0, dot) : filename;
+    const std::string extension = has_extension ? filename.substr(dot) : std::string {};
+    for (unsigned suffix = 1; suffix < 10000; ++suffix) {
+        candidate = build(stem + " (" + std::to_string(suffix) + ")" + extension);
+        if (!g_file_test(candidate.c_str(), G_FILE_TEST_EXISTS))
+            return candidate;
+    }
+    return build(stem + "-" + std::to_string(g_get_real_time()) + extension);
+}
 
 std::unordered_map<uint64_t, ProfileState> profiles;
 std::unordered_map<uint64_t, ViewState> views;
@@ -50,6 +113,14 @@ void emit(uint64_t id, UbarEventKind kind, const char* text = nullptr, uint64_t 
     found->second.callbacks.event(found->second.callbacks.user_data, &event);
 }
 
+void extension_message(WebKitUserContentManager*, JSCValue* value, gpointer user_data)
+{
+    if (!value || !jsc_value_is_string(value)) return;
+    gchar* message = jsc_value_to_string(value);
+    if (message) emit(*static_cast<uint64_t*>(user_data), UBAR_EXTENSION_MESSAGE, message);
+    g_free(message);
+}
+
 uint64_t view_id(WebKitWebView* view)
 {
     auto* value = static_cast<uint64_t*>(g_object_get_data(G_OBJECT(view), "ubar-view-id"));
@@ -61,6 +132,13 @@ void load_changed(WebKitWebView* view, WebKitLoadEvent event, gpointer)
     const auto id = view_id(view);
     switch (event) {
     case WEBKIT_LOAD_STARTED:
+        if (auto found = views.find(id); found != views.end()) {
+            auto* manager = webkit_web_view_get_user_content_manager(view);
+            for (const auto& world : found->second.bridge_worlds)
+                webkit_user_content_manager_unregister_script_message_handler_in_world(
+                    manager, "ubarExtensionBridge", world.c_str());
+            found->second.bridge_worlds.clear();
+        }
         emit(id, UBAR_NAVIGATION_STARTED, webkit_web_view_get_uri(view));
         break;
     case WEBKIT_LOAD_COMMITTED:
@@ -96,6 +174,108 @@ gboolean permission_requested(WebKitWebView* view, WebKitPermissionRequest*, gpo
 {
     emit(view_id(view), UBAR_PERMISSION_REQUESTED, webkit_web_view_get_uri(view));
     return FALSE;
+}
+
+bool is_extension_package_uri(const char* uri)
+{
+    if (!uri) return false;
+    const std::string value(uri);
+    for (const char* suffix : { ".xpi", ".crx" }) {
+        const auto extension = value.rfind(suffix);
+        if (extension != std::string::npos && (extension + 4 == value.size()
+            || value[extension + 4] == '?' || value[extension + 4] == '#')) return true;
+    }
+    return false;
+}
+
+void cleanup_download(DownloadState* state)
+{
+    if (!state) return;
+    if (!state->path.empty()) std::filesystem::remove(state->path);
+    if (!state->directory.empty()) std::filesystem::remove(state->directory);
+}
+
+gboolean decide_download_destination(WebKitDownload* download, const gchar* suggested_filename, gpointer user_data)
+{
+    auto* state = static_cast<DownloadState*>(user_data);
+    if (auto* response = webkit_download_get_response(download)) {
+        state->extension_package = state->extension_package
+            || is_extension_package_mime(webkit_uri_response_get_mime_type(response))
+            || is_extension_package_uri(webkit_uri_response_get_uri(response));
+    }
+    state->extension_package = state->extension_package
+        || (suggested_filename && is_extension_package_uri(suggested_filename));
+
+    if (!state->extension_package) {
+        const gchar* downloads = g_get_user_special_dir(G_USER_DIRECTORY_DOWNLOAD);
+        const gchar* home = g_get_home_dir();
+        std::string directory = downloads && *downloads
+            ? downloads
+            : std::string(home && *home ? home : ".") + G_DIR_SEPARATOR_S + "Downloads";
+        std::error_code directory_error;
+        std::filesystem::create_directories(directory, directory_error);
+        if (directory_error)
+            return FALSE;
+
+        state->path = collision_safe_download_path(
+            directory, safe_download_filename(suggested_filename));
+        auto* file = g_file_new_for_path(state->path.c_str());
+        gchar* destination = g_file_get_uri(file);
+        webkit_download_set_allow_overwrite(download, FALSE);
+        webkit_download_set_destination(download, destination);
+        g_free(destination);
+        g_object_unref(file);
+        return TRUE;
+    }
+
+    GError* error = nullptr;
+    gchar* directory = g_dir_make_tmp("ubar-xpi-XXXXXX", &error);
+    if (!directory) {
+        if (error) g_error_free(error);
+        return FALSE;
+    }
+    state->directory = directory;
+    state->path = state->directory + "/package.xpi";
+    auto* file = g_file_new_for_path(state->path.c_str());
+    gchar* destination = g_file_get_uri(file);
+    webkit_download_set_allow_overwrite(download, FALSE);
+    webkit_download_set_destination(download, destination);
+    g_free(destination);
+    g_object_unref(file);
+    g_free(directory);
+    return TRUE;
+}
+
+void download_finished(WebKitDownload*, gpointer user_data)
+{
+    std::unique_ptr<DownloadState> state(static_cast<DownloadState*>(user_data));
+    if (!state->extension_package)
+        return;
+    emit(state->view, UBAR_DOWNLOAD_REQUESTED, state->path.c_str());
+    cleanup_download(state.get());
+}
+
+void download_failed(WebKitDownload*, GError*, gpointer user_data)
+{
+    std::unique_ptr<DownloadState> state(static_cast<DownloadState*>(user_data));
+    cleanup_download(state.get());
+}
+
+void download_started(WebKitWebContext*, WebKitDownload* download, gpointer)
+{
+    auto* request = webkit_download_get_request(download);
+    const bool extension_package = request
+        && is_extension_package_uri(webkit_uri_request_get_uri(request));
+    auto* web_view = webkit_download_get_web_view(download);
+    auto* state = new DownloadState {
+        web_view ? view_id(web_view) : 0, {}, {}, extension_package
+    };
+    if (!state->view) { delete state; return; }
+    g_signal_connect(download, "decide-destination", G_CALLBACK(decide_download_destination), state);
+    g_signal_connect(download, "failed", G_CALLBACK(download_failed), state);
+    g_signal_connect_data(download, "finished", G_CALLBACK(download_finished), state,
+        [](gpointer data, GClosure*) { delete static_cast<DownloadState*>(data); },
+        G_CONNECT_DEFAULT);
 }
 
 const char* masked_user_agent(const std::string& uri, const std::string& fallback)
@@ -147,6 +327,7 @@ UbarResult create_profile(uint64_t id, const UbarProfileConfigV1* config)
         return UBAR_ENGINE_FAILURE;
     }
     webkit_web_context_set_sandbox_enabled(context, TRUE);
+    g_signal_connect(context, "download-started", G_CALLBACK(download_started), nullptr);
     webkit_cookie_manager_set_accept_policy(
         webkit_web_context_get_cookie_manager(context),
         config->block_third_party_cookies
@@ -219,7 +400,7 @@ UbarResult create_view(uint64_t id, uint64_t profile, const UbarViewConfigV1* co
     webkit_settings_set_enable_mediasource(settings, TRUE);
     webkit_settings_set_enable_webrtc(settings, TRUE);
     const char* current_ua = webkit_settings_get_user_agent(settings);
-    ViewState state { profile, web_view, {}, current_ua ? current_ua : "" };
+    ViewState state { profile, web_view, {}, current_ua ? current_ua : "", {} };
     if (callbacks)
         state.callbacks = *callbacks;
     views.emplace(id, std::move(state));
@@ -234,6 +415,10 @@ UbarResult create_view(uint64_t id, uint64_t profile, const UbarViewConfigV1* co
     g_signal_connect(web_view, "notify::uri", G_CALLBACK(uri_changed), nullptr);
     g_signal_connect(web_view, "web-process-terminated", G_CALLBACK(web_process_terminated), nullptr);
     g_signal_connect(web_view, "permission-request", G_CALLBACK(permission_requested), nullptr);
+    auto* bridge_id = new uint64_t(id);
+    g_signal_connect_data(webkit_web_view_get_user_content_manager(web_view),
+        "script-message-received::ubarExtensionBridge", G_CALLBACK(extension_message), bridge_id,
+        [](gpointer data, GClosure*) { delete static_cast<uint64_t*>(data); }, G_CONNECT_DEFAULT);
     gtk_container_add(GTK_CONTAINER(config->native_parent), widget);
     gtk_widget_set_size_request(widget, config->width, config->height);
     if (config->initially_visible)
@@ -246,9 +431,20 @@ UbarResult destroy_view(uint64_t id)
     auto found = views.find(id);
     if (found == views.end())
         return UBAR_INVALID_ARGUMENT;
-    gtk_widget_destroy(GTK_WIDGET(found->second.web_view));
+    gtk_widget_destroy(found->second.headless_window
+        ? found->second.headless_window : GTK_WIDGET(found->second.web_view));
     views.erase(found);
     return UBAR_OK;
+}
+
+UbarResult create_headless_view(uint64_t id, uint64_t profile, const UbarCallbacksV1* callbacks)
+{
+    auto* window = gtk_offscreen_window_new();
+    UbarViewConfigV1 config { sizeof(UbarViewConfigV1), window, 1, 1, 1., true };
+    const auto result = create_view(id, profile, &config, callbacks);
+    if (result != UBAR_OK) gtk_widget_destroy(window);
+    else views.at(id).headless_window = window;
+    return result;
 }
 
 UbarResult navigate(uint64_t id, UbarBytes value)
@@ -374,7 +570,34 @@ UbarResult set_request_policy_json(uint64_t profile, UbarBytes value)
 const UbarWebKitPortApiV1 api {
     UBAR_WEBKIT_PORT_ABI_V1, sizeof(UbarWebKitPortApiV1), create_profile, destroy_profile,
     create_view, destroy_view, navigate, set_visible, set_zoom, suspend, resume,
-    go_back, go_forward, reload, stop, set_request_policy_json
+    go_back, go_forward, reload, stop, set_request_policy_json,
+    [](UbarView view, UbarBytes world_utf8, UbarBytes script_utf8) -> UbarResult {
+      auto found = views.find(view);
+      if (found == views.end()) {
+        return UBAR_INVALID_ARGUMENT;
+      }
+      const auto world = copy_bytes(world_utf8);
+      auto script = copy_bytes(script_utf8);
+      if (!world.empty()) {
+        auto* manager = webkit_web_view_get_user_content_manager(found->second.web_view);
+        if (found->second.bridge_worlds.insert(world).second
+            && !webkit_user_content_manager_register_script_message_handler_in_world(
+                manager, "ubarExtensionBridge", world.c_str()))
+          return UBAR_ENGINE_FAILURE;
+        const auto world_literal = g_strescape(world.c_str(), nullptr);
+        std::string bridge = "if(!globalThis.__ubarExtensionBridge)Object.defineProperty(globalThis,'__ubarExtensionBridge',{value:{postMessage(m){webkit.messageHandlers.ubarExtensionBridge.postMessage(JSON.stringify({world:'";
+        bridge += world_literal;
+        bridge += "',message:String(m)}));}},configurable:false});\n";
+        g_free(world_literal);
+        script.insert(0, bridge);
+      }
+      webkit_web_view_evaluate_javascript(found->second.web_view,
+                                          script.c_str(), script.size(),
+                                          world.empty() ? nullptr : world.c_str(),
+                                          nullptr, nullptr, nullptr, nullptr);
+      return UBAR_OK;
+    },
+    create_headless_view
 };
 
 } // namespace

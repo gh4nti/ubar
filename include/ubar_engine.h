@@ -42,6 +42,8 @@ typedef enum UbarEventKind {
     UBAR_PERMISSION_REQUESTED = 6,
     UBAR_DOWNLOAD_REQUESTED = 7,
     UBAR_MEMORY_CHANGED = 8,
+    /* Internal port-to-host transport. Native shells must never receive this. */
+    UBAR_EXTENSION_MESSAGE = 9,
 } UbarEventKind;
 
 typedef struct UbarBytes {
@@ -112,6 +114,9 @@ typedef struct UbarEngineApiV1 {
     UbarResult(UBAR_CALL *go_forward)(UbarView);
     UbarResult(UBAR_CALL *reload)(UbarView);
     UbarResult(UBAR_CALL *stop)(UbarView);
+    UbarResult(UBAR_CALL *extension_control_json)(UbarProfile, UbarBytes, UbarOwnedBytes *);
+    UbarResult(UBAR_CALL *browser_control_json)(uint64_t profile,
+        UbarBytes request_json_utf8, UbarOwnedBytes *response_json_utf8_out);
 } UbarEngineApiV1;
 
 typedef UbarResult(UBAR_CALL *UbarGetEngineApi)(uint32_t, const UbarEngineApiV1 **);

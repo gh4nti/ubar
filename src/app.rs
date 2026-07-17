@@ -12,7 +12,7 @@ use gtk4::{
     Align,
     EventControllerKey, EventControllerScroll, EventControllerScrollFlags, GestureClick, Image,
     HeaderBar, Label, MenuButton, Notebook, Orientation, PackType, Popover, PositionType,
-    ScrolledWindow, WindowControls,
+    ProgressBar, ScrolledWindow, Spinner, WindowControls,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -52,6 +52,8 @@ struct AppState {
     reload_button: Button,
     address_entry: Entry,
     bookmark_button: Button,
+    download_button: MenuButton,
+    download_list: GtkBox,
     new_tab_button: Button,
     menu_button: MenuButton,
     find_bar: GtkBox,
@@ -1034,7 +1036,7 @@ fn handle_script_message(app: &Rc<AppState>, view: &WebView, message: &str) {
                 .map(|entry| entry.destination.clone());
             if let Some(destination) = destination {
                 let _ = gio::AppInfo::launch_default_for_uri(
-                    &format!("file://{destination}"),
+                    &gio::File::for_path(destination).uri(),
                     None::<&gio::AppLaunchContext>,
                 );
             }
@@ -1052,6 +1054,14 @@ fn handle_script_message(app: &Rc<AppState>, view: &WebView, message: &str) {
                 .map(|(_, download)| download.clone());
             if let Some(download) = download {
                 download.cancel();
+                let mut state = app.browser_state.borrow_mut();
+                if let Some(entry) = state.download_mut(id) {
+                    entry.status = "cancelled".into();
+                }
+                state.save();
+                drop(state);
+                app.active_downloads.borrow_mut().retain(|(entry_id, _)| *entry_id != id);
+                refresh_downloads_pages(app);
             }
         }
         return;
@@ -1069,7 +1079,7 @@ fn handle_script_message(app: &Rc<AppState>, view: &WebView, message: &str) {
     if message == "downloads-folder" {
         let dir = download_directory(app);
         let _ = gio::AppInfo::launch_default_for_uri(
-            &format!("file://{}", dir.to_string_lossy()),
+            &gio::File::for_path(dir).uri(),
             None::<&gio::AppLaunchContext>,
         );
     }
@@ -1083,13 +1093,115 @@ fn download_directory(app: &AppState) -> std::path::PathBuf {
             return path;
         }
     }
-    dirs::download_dir()
+    let path = dirs::download_dir()
         .or_else(dirs::home_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&path);
+    path
 }
 
 fn refresh_downloads_pages(app: &Rc<AppState>) {
-    let script = build_downloads_script(&app.browser_state.borrow());
+    let state = app.browser_state.borrow();
+    let script = build_downloads_script(&state);
+    let entries = state.downloads.iter().take(5).cloned().collect::<Vec<_>>();
+    app.download_button.set_visible(!entries.is_empty());
+    app.download_button.set_tooltip_text(Some("Show downloads"));
+    drop(state);
+
+    while let Some(child) = app.download_list.first_child() {
+        app.download_list.remove(&child);
+    }
+    for entry in entries {
+        let card = GtkBox::new(Orientation::Vertical, 4);
+        let title = Label::new(Some(&entry.filename));
+        title.set_halign(Align::Start);
+        title.set_max_width_chars(36);
+        title.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        card.append(&title);
+
+        let details = if entry.status == "active" {
+            if entry.total > 0 {
+                format!("{} of {}", format_bytes(entry.received), format_bytes(entry.total))
+            } else {
+                format!("{} downloaded", format_bytes(entry.received))
+            }
+        } else {
+            entry.status.clone()
+        };
+        let status = Label::new(Some(&details));
+        status.set_halign(Align::Start);
+        status.add_css_class("dim-label");
+        card.append(&status);
+
+        if entry.status == "active" {
+            if entry.total > 0 {
+                let progress = ProgressBar::new();
+                progress.set_fraction((entry.received as f64 / entry.total as f64).clamp(0.0, 1.0));
+                card.append(&progress);
+            } else {
+                let spinner = Spinner::new();
+                spinner.start();
+                spinner.set_halign(Align::Start);
+                card.append(&spinner);
+            }
+
+            let cancel = Button::with_label("Cancel");
+            let app_cancel = app.clone();
+            let id = entry.id;
+            cancel.connect_clicked(move |_| {
+                let download = app_cancel
+                    .active_downloads
+                    .borrow()
+                    .iter()
+                    .find(|(entry_id, _)| *entry_id == id)
+                    .map(|(_, download)| download.clone());
+                if let Some(download) = download {
+                    download.cancel();
+                    let mut state = app_cancel.browser_state.borrow_mut();
+                    if let Some(entry) = state.download_mut(id) {
+                        entry.status = "cancelled".into();
+                    }
+                    state.save();
+                    drop(state);
+                    app_cancel.active_downloads.borrow_mut().retain(|(entry_id, _)| *entry_id != id);
+                    refresh_downloads_pages(&app_cancel);
+                }
+            });
+            card.append(&cancel);
+        } else if entry.status == "done" {
+            let actions = GtkBox::new(Orientation::Horizontal, 4);
+            let open = Button::with_label("Open");
+            let destination = entry.destination.clone();
+            open.connect_clicked(move |_| {
+                let _ = gio::AppInfo::launch_default_for_uri(
+                    &gio::File::for_path(&destination).uri(),
+                    None::<&gio::AppLaunchContext>,
+                );
+            });
+            actions.append(&open);
+            let show = Button::with_label("Show");
+            let destination = entry.destination.clone();
+            show.connect_clicked(move |_| {
+                if let Some(parent) = std::path::Path::new(&destination).parent() {
+                    let _ = gio::AppInfo::launch_default_for_uri(
+                        &gio::File::for_path(parent).uri(),
+                        None::<&gio::AppLaunchContext>,
+                    );
+                }
+            });
+            actions.append(&show);
+            card.append(&actions);
+        }
+        app.download_list.append(&card);
+    }
+    let all = Button::with_label("All downloads");
+    let app_all = app.clone();
+    all.connect_clicked(move |_| {
+        app_all.download_button.popdown();
+        load_uri_in_current_tab(&app_all, &app_all.downloads_uri);
+    });
+    app.download_list.append(&all);
+
     for index in 0..app.notebook.n_pages() {
         if let Some(page) = app.notebook.nth_page(Some(index))
             && let Some(tab) = unsafe { page.data::<TabState>("tab-state") }
@@ -1099,6 +1211,17 @@ fn refresh_downloads_pages(app: &Rc<AppState>) {
             evaluate_js(&tab.web_view, &script, &app.downloads_uri);
         }
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
 // Fill the first login form when a credential is stored for this origin.
@@ -1447,7 +1570,8 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
     select_click.set_button(gdk::BUTTON_PRIMARY);
     let app_select = app.clone();
     let view_select = web_view.clone();
-    select_click.connect_pressed(move |_, _, _, _| {
+    // Select on release so this gesture does not win against DragSource.
+    select_click.connect_released(move |_, _, _, _| {
         if let Some(index) = app_select.notebook.page_num(&view_select) {
             app_select.notebook.set_current_page(Some(index));
         }
@@ -1465,6 +1589,7 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
     let drag_source = DragSource::new();
     drag_source.set_actions(gdk::DragAction::MOVE);
+    drag_source.set_propagation_phase(gtk4::PropagationPhase::Capture);
     let app_drag = app.clone();
     let view_drag = web_view.clone();
     drag_source.connect_prepare(move |_, _, _| {
@@ -1494,14 +1619,11 @@ fn create_tab(app: &Rc<AppState>, uri: &str) -> TabState {
 
         let width = f64::from(tab_box_drop.allocation().width().max(1));
         let insert_after = x >= width / 2.0;
-        let mut destination = target + u32::from(insert_after);
         let page_count = app_drop.notebook.n_pages();
-        if destination >= page_count {
-            destination = page_count.saturating_sub(1);
-        }
-        if (source as u32) < destination {
-            destination = destination.saturating_sub(1);
-        }
+        let insertion = target + u32::from(insert_after);
+        let destination = insertion
+            .saturating_sub(u32::from((source as u32) < insertion))
+            .min(page_count.saturating_sub(1));
 
         move_tab(&app_drop, source as u32, destination);
         true
@@ -2028,6 +2150,18 @@ pub fn run() {
         address_entry.set_hexpand(true);
         address_entry.set_height_request(TAB_HEIGHT);
         bookmark_button.set_has_frame(false);
+        let download_button = MenuButton::new();
+        download_button.set_icon_name("folder-download-symbolic");
+        download_button.set_has_frame(false);
+        download_button.set_visible(false);
+        let download_list = GtkBox::new(Orientation::Vertical, 8);
+        download_list.set_margin_top(10);
+        download_list.set_margin_bottom(10);
+        download_list.set_margin_start(10);
+        download_list.set_margin_end(10);
+        let download_popover = Popover::new();
+        download_popover.set_child(Some(&download_list));
+        download_button.set_popover(Some(&download_popover));
         extensions_button.set_has_frame(false);
         new_tab_button.set_has_frame(false);
         toolbar.append(&back_button);
@@ -2035,6 +2169,7 @@ pub fn run() {
         toolbar.append(&reload_button);
         toolbar.append(&address_entry);
         toolbar.append(&bookmark_button);
+        toolbar.append(&download_button);
         toolbar.append(&extensions_button);
         toolbar.append(&menu_button);
 
@@ -2097,6 +2232,8 @@ pub fn run() {
             reload_button,
             address_entry,
             bookmark_button,
+            download_button,
+            download_list,
             new_tab_button,
             menu_button,
             find_bar,
@@ -2125,6 +2262,7 @@ pub fn run() {
             }
             state.save();
         }
+        refresh_downloads_pages(&app);
         apply_theme(&app.browser_state.borrow().settings.theme);
         apply_cookie_policy(&app);
 
@@ -2141,7 +2279,15 @@ pub fn run() {
             let app_decide = app_download.clone();
             let entry_id_decide = entry_id.clone();
             download.connect_decide_destination(move |download, suggested| {
-                let name = if suggested.is_empty() { "download" } else { suggested };
+                let name = std::path::Path::new(if suggested.is_empty() {
+                    "download"
+                } else {
+                    suggested
+                })
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("download");
                 let lower = name.to_ascii_lowercase();
                 if lower.ends_with(".xpi") || lower.ends_with(".crx")
                     || download
@@ -2156,7 +2302,7 @@ pub fn run() {
                         pending.join(format!("{name}.crx"))
                     };
                     download.set_allow_overwrite(true);
-                    download.set_destination(&staged.to_string_lossy());
+                    download.set_destination(&gio::File::for_path(&staged).uri());
                     return true;
                 }
 
@@ -2167,7 +2313,7 @@ pub fn run() {
                     path = dir.join(format!("{counter}-{name}"));
                     counter += 1;
                 }
-                download.set_destination(&path.to_string_lossy());
+                download.set_destination(&gio::File::for_path(&path).uri());
 
                 let uri = download
                     .request()
@@ -2248,13 +2394,13 @@ pub fn run() {
                     {
                         let mut state = app_finished.browser_state.borrow_mut();
                         if let Some(entry) = state.download_mut(id) {
-                            if entry.status == "active" {
-                                entry.status = "done".into();
-                                entry.received = download.received_data_length();
-                                if entry.total == 0 {
-                                    entry.total = entry.received;
-                                }
+                            let received = download.received_data_length();
+                            if entry.total == 0 {
+                                entry.total = received;
                             }
+                            entry.received = entry.total.max(received);
+                            entry.total = entry.received;
+                            entry.status = "done".into();
                         }
                         state.save();
                     }
@@ -2273,7 +2419,9 @@ pub fn run() {
                 if !lower.ends_with(".xpi") && !lower.ends_with(".crx") {
                     return;
                 }
-                let path = std::path::PathBuf::from(dest.as_str());
+                let Some(path) = gio::File::for_uri(&dest).path() else {
+                    return;
+                };
                 match crate::extensions::install_file(&path) {
                     Ok(name) => {
                         println!("ubar: installed extension: {name}");
@@ -2420,6 +2568,7 @@ pub fn run() {
         });
 
         let controller = EventControllerKey::new();
+        controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let app_keys = app.clone();
         controller.connect_key_pressed(move |_, key, _, state| {
             if !state.contains(gdk::ModifierType::CONTROL_MASK) {
@@ -2452,7 +2601,7 @@ pub fn run() {
                 return glib::Propagation::Proceed;
             }
 
-            if key == gdk::Key::Tab {
+            if key == gdk::Key::Tab || key == gdk::Key::ISO_Left_Tab {
                 let total = app_keys.notebook.n_pages();
                 if total > 0 {
                     let current = app_keys.notebook.current_page().unwrap_or(0);

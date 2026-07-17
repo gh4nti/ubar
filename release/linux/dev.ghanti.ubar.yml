@@ -1,0 +1,29 @@
+app-id: dev.ghanti.ubar
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: ubar-gtk3-shell
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-download
+  - --talk-name=org.freedesktop.portal.Desktop
+modules:
+  - name: ubar
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 ubar-gtk3-shell /app/bin/ubar-gtk3-shell
+      - install -Dm755 ubar-cdm-worker /app/bin/ubar-cdm-worker
+      - install -Dm755 ubar-xpi-verifier /app/bin/ubar-xpi-verifier
+      - install -Dm755 ubar-crx3-verifier /app/bin/ubar-crx3-verifier
+      - cp -a *.so* /app/lib/
+      - if test -f libubar_widevine_adapter.so; then install -Dm755 libubar_widevine_adapter.so /app/bin/libubar_widevine_adapter.so; fi
+      - install -Dm644 dev.ghanti.ubar.desktop /app/share/applications/dev.ghanti.ubar.desktop
+      - install -Dm644 dev.ghanti.ubar.svg /app/share/icons/hicolor/scalable/apps/dev.ghanti.ubar.svg
+    sources:
+      - type: dir
+        path: stage

@@ -17,6 +17,7 @@ type CreateViewFn = unsafe extern "C" fn(
 ) -> UbarResult;
 type DestroyViewFn = unsafe extern "C" fn(u64) -> UbarResult;
 type ViewBytesFn = unsafe extern "C" fn(u64, UbarBytes) -> UbarResult;
+type ViewTwoBytesFn = unsafe extern "C" fn(u64, UbarBytes, UbarBytes) -> UbarResult;
 type ViewBoolFn = unsafe extern "C" fn(u64, bool) -> UbarResult;
 type ViewF64Fn = unsafe extern "C" fn(u64, f64) -> UbarResult;
 type ViewFn = unsafe extern "C" fn(u64) -> UbarResult;
@@ -41,6 +42,8 @@ struct WebKitPortApiV1 {
     reload: ViewFn,
     stop: ViewFn,
     set_request_policy_json: ProfileBytesFn,
+    evaluate_extension_script: ViewTwoBytesFn,
+    create_headless_view: unsafe extern "C" fn(u64, u64, *const UbarCallbacksV1) -> UbarResult,
 }
 
 type GetPortApiFn = unsafe extern "C" fn(u32, *mut *const WebKitPortApiV1) -> UbarResult;
@@ -121,5 +124,23 @@ impl WebKitBackend {
     pub fn stop(&self, id: u64) -> UbarResult { unsafe { (self.api.stop)(id) } }
     pub fn set_request_policy_json(&self, profile: u64, value: UbarBytes) -> UbarResult {
         unsafe { (self.api.set_request_policy_json)(profile, value) }
+    }
+
+    pub fn evaluate_extension_script(
+        &self,
+        view: u64,
+        world: UbarBytes,
+        script: UbarBytes,
+    ) -> UbarResult {
+        unsafe { (self.api.evaluate_extension_script)(view, world, script) }
+    }
+
+    pub fn create_headless_view(
+        &self,
+        id: u64,
+        profile: u64,
+        callbacks: *const UbarCallbacksV1,
+    ) -> UbarResult {
+        unsafe { (self.api.create_headless_view)(id, profile, callbacks) }
     }
 }

@@ -1,0 +1,216 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  UBAR_WEBKIT_COMMIT: 3af9d4073d75a9b44668cebc03a41223dbef5745
+  UBAR_FIREFOX_SCHEMA_COMMIT: 79223b6429f6d8844435cfdbf68ad699367bfec5
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            rust: x86_64-pc-windows-msvc
+            runner: [self-hosted, windows, x64, ubar-webkit]
+          - arch: ARM64
+            rust: aarch64-pc-windows-msvc
+            runner: [self-hosted, windows, arm64, ubar-webkit]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: '${{ matrix.rust }}' }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - shell: pwsh
+        run: "git show -s --format='SOURCE_DATE_EPOCH=%ct' | Out-File -Append $env:GITHUB_ENV"
+      - name: Verify pinned WebKit build
+        shell: pwsh
+        run: |
+          ./scripts/verify-webkit-build.ps1 -BuildDirectory "$env:UBAR_WEBKIT_BUILD_DIR"
+          if (!(Test-Path "$env:UBAR_WEBKIT_BUILD_DIR\include\WebKit\WebKit2_C.h")) { throw 'Pinned WebKit build missing' }
+      - run: cargo build --release -p ubar-engine-host -p ubar-cdm-worker -p ubar-xpi-verifier -p ubar-crx3-verifier --target ${{ matrix.rust }} --no-default-features
+      - run: dotnet publish platform/windows/UbarShell/UbarShell.csproj -c Release -p:Platform=${{ matrix.arch }} --self-contained false
+      - name: Build WebKit port adapter
+        run: cmake -S engine/webkit -B build/webkit-port -A ${{ matrix.arch }} -DUBAR_WEBKIT_BUILD_DIR="$env:UBAR_WEBKIT_BUILD_DIR"
+      - run: cmake --build build/webkit-port --config Release
+      - name: Build AppContainer CDM broker
+        run: cmake -S platform/windows/cdm-broker -B build/cdm-broker -A ${{ matrix.arch }}
+      - run: cmake --build build/cdm-broker --config Release
+      - name: Stage
+        shell: pwsh
+        env:
+          UBAR_WINDOWS_PACKAGE_ID: ${{ vars.WINDOWS_PACKAGE_ID }}
+          UBAR_WINDOWS_PUBLISHER: ${{ vars.WINDOWS_PUBLISHER }}
+        run: |
+          if (!$env:UBAR_WINDOWS_PACKAGE_ID -or !$env:UBAR_WINDOWS_PUBLISHER) { throw 'Windows package identity variables missing' }
+          New-Item -ItemType Directory -Force dist/package/Assets | Out-Null
+          Copy-Item "target/${{ matrix.rust }}/release/ubar_engine.dll" dist/package/
+          Copy-Item "target/${{ matrix.rust }}/release/ubar-cdm-worker.exe" dist/package/
+          Copy-Item "target/${{ matrix.rust }}/release/ubar-xpi-verifier.exe" dist/package/
+          Copy-Item "target/${{ matrix.rust }}/release/ubar-crx3-verifier.exe" dist/package/
+          Copy-Item "build/webkit-port/Release/ubar_webkit_port.dll" dist/package/
+          Copy-Item build/cdm-broker/Release/ubar-cdm-appcontainer.exe dist/package/
+          if (Test-Path $env:UBAR_WIDEVINE_ADAPTER_PATH) { Copy-Item $env:UBAR_WIDEVINE_ADAPTER_PATH dist/package/ubar_widevine_adapter.dll }
+          Copy-Item "platform/windows/UbarShell/bin/${{ matrix.arch }}/Release/*/publish/*" dist/package/ -Recurse
+          $version = if ($env:GITHUB_REF_NAME -match '^v(\d+\.\d+\.\d+)(?:\.(\d+))?') { "$($Matches[1]).$($Matches[2] ?? '0')" } else { '0.1.0.0' }
+          $manifest = Get-Content release/windows/Package.appxmanifest.in -Raw
+          $manifest = $manifest.Replace('@UBAR_PACKAGE_ID@', $env:UBAR_WINDOWS_PACKAGE_ID).Replace('@UBAR_PUBLISHER@', $env:UBAR_WINDOWS_PUBLISHER).Replace('@UBAR_VERSION@', $version).Replace('@UBAR_ARCH@', '${{ matrix.arch }}'.ToLower())
+          Set-Content dist/package/AppxManifest.xml $manifest -NoNewline
+          magick assets/branding/ubar.svg -resize 50x50 dist/package/Assets/StoreLogo.png
+          magick assets/branding/ubar.svg -resize 44x44 dist/package/Assets/Square44x44Logo.png
+          magick assets/branding/ubar.svg -resize 150x150 dist/package/Assets/Square150x150Logo.png
+          magick assets/branding/ubar.svg -resize 150x150 -gravity center -background none -extent 310x150 dist/package/Assets/Wide310x150Logo.png
+          makeappx pack /d dist/package /p "dist/ubar-${{ matrix.arch }}.msix" /o
+      - name: Sign
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          SIGN_CERT_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_BASE64 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: |
+          if (!$env:SIGN_CERT_BASE64) { throw 'Windows signing certificate missing' }
+          [IO.File]::WriteAllBytes("signing.pfx", [Convert]::FromBase64String($env:SIGN_CERT_BASE64))
+          Get-ChildItem dist/package -Recurse -Include *.exe,*.dll | ForEach-Object { signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f signing.pfx /p $env:SIGN_CERT_PASSWORD $_.FullName }
+          makeappx pack /d dist/package /p "dist/ubar-${{ matrix.arch }}.msix" /o
+          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f signing.pfx /p $env:SIGN_CERT_PASSWORD "dist/ubar-${{ matrix.arch }}.msix"
+          Remove-Item signing.pfx
+          "UBAR_ARTIFACT_SIGNED=true" | Out-File -Append $env:GITHUB_ENV
+      - run: cargo run -p ubar-release-tool -- manifest --artifacts dist --target ${{ matrix.rust }} --output dist/release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with: { name: 'ubar-${{ matrix.rust }}', path: dist }
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            rust: x86_64-apple-darwin
+            runner: [self-hosted, macos, x64, ubar-webkit]
+          - arch: arm64
+            rust: aarch64-apple-darwin
+            runner: [self-hosted, macos, arm64, ubar-webkit]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: '${{ matrix.rust }}' }
+      - run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct)" >> "$GITHUB_ENV"
+      - name: Verify pinned WebKit build
+        run: sh scripts/verify-webkit-build.sh "$UBAR_WEBKIT_BUILD_DIR" && test -d "$UBAR_WEBKIT_FRAMEWORK_DIR/WebKit.framework"
+      - run: cargo build --release -p ubar-engine-host -p ubar-cdm-worker -p ubar-xpi-verifier -p ubar-crx3-verifier --target ${{ matrix.rust }} --no-default-features
+      - run: swift build -c release --arch ${{ matrix.arch }} --package-path platform/macos/UbarShell
+      - run: cmake -S engine/webkit -B build/webkit-port -DUBAR_WEBKIT_FRAMEWORK_DIR="$UBAR_WEBKIT_FRAMEWORK_DIR"
+      - run: cmake --build build/webkit-port --config Release
+      - name: Stage app
+        run: |
+          mkdir -p dist/uBar.app/Contents/{MacOS,Frameworks,Resources}
+          cp release/macos/Info.plist dist/uBar.app/Contents/
+          cp platform/macos/UbarShell/.build/${{ matrix.arch }}-apple-macosx/release/UbarShell dist/uBar.app/Contents/MacOS/
+          cp target/${{ matrix.rust }}/release/libubar_engine.dylib dist/uBar.app/Contents/Frameworks/
+          cp target/${{ matrix.rust }}/release/ubar-cdm-worker dist/uBar.app/Contents/MacOS/
+          cp target/${{ matrix.rust }}/release/ubar-xpi-verifier dist/uBar.app/Contents/MacOS/
+          cp target/${{ matrix.rust }}/release/ubar-crx3-verifier dist/uBar.app/Contents/MacOS/
+          cp build/webkit-port/libubar_webkit_port.dylib dist/uBar.app/Contents/Frameworks/
+          if test -n "$UBAR_WIDEVINE_ADAPTER_PATH"; then cp "$UBAR_WIDEVINE_ADAPTER_PATH" dist/uBar.app/Contents/Frameworks/libubar_widevine_adapter.dylib; fi
+          cp -R "$UBAR_WEBKIT_FRAMEWORK_DIR/WebKit.framework" dist/uBar.app/Contents/Frameworks/
+      - run: cargo run -p ubar-release-tool -- manifest --artifacts dist --target ${{ matrix.rust }} --output dist/release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with: { name: 'ubar-${{ matrix.rust }}', path: dist }
+
+  macos-universal:
+    needs: macos
+    runs-on: [self-hosted, macos, arm64, ubar-webkit]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubar-x86_64-apple-darwin
+          path: inputs/x86
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubar-aarch64-apple-darwin
+          path: inputs/arm
+      - name: Merge universal app
+        run: |
+          mkdir -p dist
+          sh scripts/make-universal-app.sh inputs/x86/uBar.app inputs/arm/uBar.app dist/uBar.app
+          hdiutil create -fs HFS+ -srcfolder dist/uBar.app -volname uBar dist/uBar.dmg
+      - name: Sign and notarize
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: |
+          test -n "$SIGN_IDENTITY" && test -n "$NOTARY_PROFILE"
+          find dist/uBar.app/Contents -depth -type f \( -name '*.dylib' -o -perm -111 \) -exec codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" {} \;
+          find dist/uBar.app/Contents -depth -type d -name '*.framework' -exec codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" {} \;
+          codesign --force --options runtime --timestamp --entitlements release/macos/uBar.entitlements --sign "$SIGN_IDENTITY" dist/uBar.app
+          hdiutil create -ov -fs HFS+ -srcfolder dist/uBar.app -volname uBar dist/uBar.dmg
+          xcrun notarytool submit dist/uBar.dmg --keychain-profile "$NOTARY_PROFILE" --wait
+          xcrun stapler staple dist/uBar.dmg
+          echo UBAR_ARTIFACT_SIGNED=true >> "$GITHUB_ENV"
+      - run: cargo run -p ubar-release-tool -- manifest --artifacts dist --target universal-apple-darwin --output dist/release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with: { name: ubar-universal-apple-darwin, path: dist }
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rust: x86_64-unknown-linux-gnu
+            appimage_arch: x86_64
+            deb_arch: amd64
+            rpm_arch: x86_64
+            runner: [self-hosted, linux, x64, ubar-webkit]
+          - rust: aarch64-unknown-linux-gnu
+            appimage_arch: aarch64
+            deb_arch: arm64
+            rpm_arch: aarch64
+            runner: [self-hosted, linux, arm64, ubar-webkit]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: '${{ matrix.rust }}' }
+      - run: echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct)" >> "$GITHUB_ENV"
+      - run: echo "PKG_CONFIG_PATH=$UBAR_WEBKIT_BUILD_DIR/lib/pkgconfig:$UBAR_WEBKIT_BUILD_DIR/lib64/pkgconfig" >> "$GITHUB_ENV"
+      - name: Verify pinned WebKit build
+        run: sh scripts/verify-webkit-build.sh "$UBAR_WEBKIT_BUILD_DIR" && pkg-config --exists webkit2gtk-4.1 gtk+-3.0
+      - run: cargo build --release -p ubar-engine-host -p ubar-cdm-worker -p ubar-xpi-verifier -p ubar-crx3-verifier --target ${{ matrix.rust }} --no-default-features
+      - run: meson setup build/gtk3 platform/linux/gtk3 --buildtype=release
+      - run: meson compile -C build/gtk3
+      - run: cmake -S engine/webkit -B build/webkit-port -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build/webkit-port
+      - name: Package
+        run: |
+          mkdir -p build/package-stage dist
+          cp target/${{ matrix.rust }}/release/libubar_engine.so build/package-stage/
+          cp target/${{ matrix.rust }}/release/ubar-cdm-worker build/package-stage/
+          cp target/${{ matrix.rust }}/release/ubar-xpi-verifier build/package-stage/
+          cp target/${{ matrix.rust }}/release/ubar-crx3-verifier build/package-stage/
+          cp build/webkit-port/libubar_webkit_port.so build/package-stage/
+          cp build/gtk3/ubar-gtk3-shell build/package-stage/
+          find "$UBAR_WEBKIT_BUILD_DIR/lib" "$UBAR_WEBKIT_BUILD_DIR/lib64" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} build/package-stage/ \; 2>/dev/null || true
+          if test -n "$UBAR_WIDEVINE_ADAPTER_PATH"; then cp "$UBAR_WIDEVINE_ADAPTER_PATH" build/package-stage/libubar_widevine_adapter.so; fi
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in *[!0-9.]*|'') version=0.1.0 ;; esac
+          sh release/linux/package.sh build/package-stage dist ${{ matrix.appimage_arch }} ${{ matrix.deb_arch }} ${{ matrix.rpm_arch }} "$version"
+      - run: cargo run -p ubar-release-tool -- manifest --artifacts dist --target ${{ matrix.rust }} --output dist/release-manifest.json
+      - uses: actions/upload-artifact@v4
+        with: { name: 'ubar-${{ matrix.rust }}', path: dist }

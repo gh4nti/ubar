@@ -1,0 +1,51 @@
+name: hardware-certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Release workflow run containing signed artifacts
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  certify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: [self-hosted, windows, x64, ubar-cert]
+          - target: aarch64-pc-windows-msvc
+            runner: [self-hosted, windows, arm64, ubar-cert]
+          - target: x86_64-apple-darwin
+            runner: [self-hosted, macos, x64, ubar-cert]
+          - target: aarch64-apple-darwin
+            runner: [self-hosted, macos, arm64, ubar-cert]
+          - target: x86_64-unknown-linux-gnu
+            runner: [self-hosted, linux, x64, ubar-cert]
+          - target: aarch64-unknown-linux-gnu
+            runner: [self-hosted, linux, arm64, ubar-cert]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: 'ubar-${{ matrix.target }}'
+          path: dist
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Measure browser
+        run: ubar-cert-harness --browser dist --output-env certification.env
+      - name: Import measured evidence
+        shell: bash
+        run: cat certification.env >> "$GITHUB_ENV"
+      - name: Enforce certification gates
+        run: cargo run -p ubar-release-tool -- certify --manifest dist/release-manifest.json --target ${{ matrix.target }} --output dist/certification.json
+      - uses: actions/upload-artifact@v4
+        with: { name: 'certification-${{ matrix.target }}', path: dist/certification.json }

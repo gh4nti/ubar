@@ -1,4 +1,5 @@
 use crate::lifecycle::BackgroundKind;
+use crate::worlds::RunAt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -21,6 +22,19 @@ pub struct ActionSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContentScriptSpec {
+    pub matches: Vec<String>,
+    pub exclude_matches: Vec<String>,
+    pub include_globs: Vec<String>,
+    pub exclude_globs: Vec<String>,
+    pub js: Vec<String>,
+    pub css: Vec<String>,
+    pub run_at: RunAt,
+    pub all_frames: bool,
+    pub match_about_blank: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NormalizedManifest {
     pub manifest_version: u64,
     pub name: String,
@@ -32,7 +46,7 @@ pub struct NormalizedManifest {
     pub optional_host_permissions: BTreeSet<String>,
     pub background: Option<BackgroundSpec>,
     pub action: Option<ActionSpec>,
-    pub content_scripts: Vec<Value>,
+    pub content_scripts: Vec<ContentScriptSpec>,
     pub web_accessible_resources: Vec<Value>,
     pub content_security_policy: Value,
     pub chrome_compatibility_required: bool,
@@ -73,6 +87,7 @@ pub fn normalize(value: Value) -> Result<NormalizedManifest, String> {
     if object.contains_key("browser_action") || object.contains_key("page_action") {
         warnings.push("MV2 action translated to the shared action model".into());
     }
+    let content_scripts = normalize_content_scripts(object)?;
     let web_accessible_resources = normalize_resources(object, manifest_version)?;
     let content_security_policy = match object.get("content_security_policy") {
         Some(Value::String(value)) => json!({"extension_pages": value}),
@@ -94,13 +109,54 @@ pub fn normalize(value: Value) -> Result<NormalizedManifest, String> {
         optional_host_permissions,
         background,
         action,
-        content_scripts: array(object.get("content_scripts")),
+        content_scripts,
         web_accessible_resources,
         content_security_policy,
         chrome_compatibility_required,
         warnings,
         raw: value,
     })
+}
+
+fn normalize_content_scripts(object: &Map<String, Value>) -> Result<Vec<ContentScriptSpec>, String> {
+    array(object.get("content_scripts")).into_iter().enumerate().map(|(index, value)| {
+        let value = value.as_object()
+            .ok_or_else(|| format!("content_scripts[{index}] must be an object"))?;
+        let matches = strings_vec(value.get("matches"));
+        let js = strings_vec(value.get("js"));
+        let css = strings_vec(value.get("css"));
+        if matches.is_empty() { return Err(format!("content_scripts[{index}] requires matches")); }
+        if js.is_empty() && css.is_empty() {
+            return Err(format!("content_scripts[{index}] requires js or css"));
+        }
+        for path in js.iter().chain(&css) { validate_relative_asset(path)?; }
+        let run_at = match value.get("run_at").and_then(Value::as_str).unwrap_or("document_idle") {
+            "document_start" => RunAt::DocumentStart,
+            "document_end" => RunAt::DocumentEnd,
+            "document_idle" => RunAt::DocumentIdle,
+            other => return Err(format!("content_scripts[{index}] has invalid run_at {other}")),
+        };
+        Ok(ContentScriptSpec {
+            matches,
+            exclude_matches: strings_vec(value.get("exclude_matches")),
+            include_globs: strings_vec(value.get("include_globs")),
+            exclude_globs: strings_vec(value.get("exclude_globs")),
+            js,
+            css,
+            run_at,
+            all_frames: value.get("all_frames").and_then(Value::as_bool).unwrap_or(false),
+            match_about_blank: value.get("match_about_blank").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }).collect()
+}
+
+fn validate_relative_asset(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') || path.contains("\\")
+        || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+    {
+        return Err(format!("extension asset path is unsafe: {path}"));
+    }
+    Ok(())
 }
 
 fn normalize_background(
@@ -112,6 +168,7 @@ fn normalize_background(
         return Ok(None);
     };
     if let Some(worker) = background.get("service_worker").and_then(Value::as_str) {
+        validate_relative_asset(worker)?;
         return Ok(Some(BackgroundSpec {
             kind: BackgroundKind::ManifestV3Worker,
             scripts: Vec::new(),
@@ -126,6 +183,8 @@ fn normalize_background(
     }
     let scripts = strings_vec(background.get("scripts"));
     let page = background.get("page").and_then(Value::as_str).map(str::to_string);
+    for path in &scripts { validate_relative_asset(path)?; }
+    if let Some(path) = &page { validate_relative_asset(path)?; }
     if scripts.is_empty() && page.is_none() {
         return Err("MV2 background requires scripts or page".into());
     }

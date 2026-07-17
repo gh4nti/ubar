@@ -23,6 +23,7 @@
     <input id="address" aria-label="Address" autocomplete="off" spellcheck="false">
     <div id="extension-actions" aria-label="Extensions"></div>
     <button id="bookmark" title="Bookmark">&#x2606;</button>
+    <button id="downloads" title="Downloads" aria-expanded="false" hidden>&#x2193;</button>
     <button id="more" title="More">&#x22ef;</button>
   </div>
   <div id="app-menu" hidden>
@@ -40,6 +41,11 @@
     <button data-command="task-manager">Tasks</button>
     <button data-page="extensions">Extensions</button>
     <button data-page="settings">Settings</button>
+  </div>
+  <div id="downloads-panel" hidden>
+    <div class="downloads-header">Downloads</div>
+    <div id="downloads-list"></div>
+    <button id="downloads-all">Show all downloads</button>
   </div>
   <script src="app.js"></script>
 </body>

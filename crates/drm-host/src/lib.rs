@@ -8,6 +8,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub mod widevine;
 pub mod broker;
+pub mod adapter;
 
 type Aes128Ctr = ctr::Ctr128BE<Aes128>;
 

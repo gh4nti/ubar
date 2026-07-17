@@ -28,6 +28,11 @@ typedef struct UbarWebKitPortApiV1 {
     UbarResult (*reload)(uint64_t id);
     UbarResult (*stop)(uint64_t id);
     UbarResult (*set_request_policy_json)(uint64_t profile, UbarBytes policy_json);
+    UbarResult (*evaluate_extension_script)(UbarView view,
+                                            UbarBytes world_utf8,
+                                            UbarBytes script_utf8);
+    UbarResult (*create_headless_view)(uint64_t id, uint64_t profile,
+                                      const UbarCallbacksV1* callbacks);
 } UbarWebKitPortApiV1;
 
 UBAR_EXPORT UbarResult ubar_webkit_port_get_api(

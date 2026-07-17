@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=uBar
+Comment=Resource-efficient WebKit browser
+Exec=ubar-gtk3-shell %U
+Icon=dev.ghanti.ubar
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+StartupNotify=true

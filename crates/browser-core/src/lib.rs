@@ -1,3 +1,7 @@
+pub mod hibernation;
+pub mod secrets;
+pub mod services;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ubar_engine_abi::UbarProfileKind;
@@ -45,6 +49,8 @@ pub struct Profile {
     pub id: u64,
     pub kind: UbarProfileKind,
     pub persistent: bool,
+    pub memory_target_bytes: u64,
+    pub memory_ceiling_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,6 +60,7 @@ pub struct ViewState {
     pub uri: String,
     pub visible: bool,
     pub suspended: bool,
+    pub hibernated: bool,
 }
 
 #[derive(Debug)]
@@ -84,11 +91,26 @@ impl BrowserCore {
         self.profiles.contains_key(&profile_id)
     }
 
+    pub fn profile(&self, profile_id: u64) -> Option<&Profile> {
+        self.profiles.get(&profile_id)
+    }
+
     pub fn create_profile(&mut self, kind: UbarProfileKind) -> Profile {
+        self.create_profile_with_memory(kind, 1024 * 1024 * 1024, 1280 * 1024 * 1024)
+    }
+
+    pub fn create_profile_with_memory(
+        &mut self,
+        kind: UbarProfileKind,
+        memory_target_bytes: u64,
+        memory_ceiling_bytes: u64,
+    ) -> Profile {
         let profile = Profile {
             id: self.next_profile,
             kind,
             persistent: kind == UbarProfileKind::Normal,
+            memory_target_bytes,
+            memory_ceiling_bytes: memory_ceiling_bytes.max(memory_target_bytes),
         };
         self.next_profile += 1;
         self.profiles.insert(profile.id, profile.clone());
@@ -103,6 +125,7 @@ impl BrowserCore {
             uri: uri.into(),
             visible: true,
             suspended: false,
+            hibernated: false,
         };
         self.next_view += 1;
         self.views.insert(view.id, view.clone());
@@ -127,6 +150,7 @@ impl BrowserCore {
         };
         view.uri = uri.into();
         view.suspended = false;
+        view.hibernated = false;
         true
     }
 
@@ -167,6 +191,32 @@ impl BrowserCore {
             return false;
         };
         view.suspended = false;
+        true
+    }
+
+    pub fn view(&self, view_id: u64) -> Option<&ViewState> {
+        self.views.get(&view_id)
+    }
+
+    pub fn hidden_views(&self, profile_id: u64) -> Vec<u64> {
+        self.views.values()
+            .filter(|view| view.profile_id == profile_id && !view.visible && !view.hibernated)
+            .map(|view| view.id)
+            .collect()
+    }
+
+    pub fn mark_hibernated(&mut self, view_id: u64) -> bool {
+        let Some(view) = self.views.get_mut(&view_id) else { return false; };
+        if view.visible { return false; }
+        view.suspended = true;
+        view.hibernated = true;
+        true
+    }
+
+    pub fn mark_restored(&mut self, view_id: u64) -> bool {
+        let Some(view) = self.views.get_mut(&view_id) else { return false; };
+        view.suspended = false;
+        view.hibernated = false;
         true
     }
 

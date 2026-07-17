@@ -1,4 +1,6 @@
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 
 namespace UbarShell;
@@ -12,6 +14,8 @@ internal sealed class EngineBridge : IDisposable
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Bytes { public nint Data; public nuint Length; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct OwnedBytes { public nint Data; public nuint Length; public nuint Capacity; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ProfileConfig
@@ -40,6 +44,15 @@ internal sealed class EngineBridge : IDisposable
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Callbacks { public uint Size; public nint UserData; public nint Event; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeEvent
+    {
+        public uint Size;
+        public uint Kind;
+        public ulong View;
+        public Bytes Text;
+        public ulong Value;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct EngineApi
@@ -63,6 +76,8 @@ internal sealed class EngineBridge : IDisposable
         public nint GoForward;
         public nint Reload;
         public nint Stop;
+        public nint ExtensionControlJson;
+        public nint BrowserControlJson;
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -80,7 +95,21 @@ internal sealed class EngineBridge : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SetVisible(ulong view, [MarshalAs(UnmanagedType.I1)] bool visible);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int SetZoom(ulong view, double zoom);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int ViewCommand(ulong view);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int ProfileJson(ulong profile, Bytes request, out OwnedBytes response);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void FreeOwnedBytes(OwnedBytes value);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void EventCallback(nint userData, nint nativeEvent);
+
+    public sealed record ExtensionAction(string Id, string Title);
+    public sealed record EngineEvent(uint Kind, ulong View, string Text, ulong Value);
+
+    private readonly EventCallback eventCallback;
+    public event Action<EngineEvent>? EventReceived;
 
     public string Status { get; private set; } = "engine ABI unavailable";
 
@@ -107,6 +136,8 @@ internal sealed class EngineBridge : IDisposable
         return bridge;
     }
 
+    private EngineBridge() { eventCallback = OnNativeEvent; }
+
     public void Attach(bool privateMode)
     {
         if (api.CreateProfile == 0) return;
@@ -127,7 +158,10 @@ internal sealed class EngineBridge : IDisposable
             Size = (uint)Marshal.SizeOf<ViewConfig>(), NativeParent = nativeParent,
             Width = width, Height = height, DeviceScale = scale, Visible = true,
         };
-        var callbacks = new Callbacks { Size = (uint)Marshal.SizeOf<Callbacks>() };
+        var callbacks = new Callbacks {
+            Size = (uint)Marshal.SizeOf<Callbacks>(),
+            Event = Marshal.GetFunctionPointerForDelegate(eventCallback),
+        };
         int result = Marshal.GetDelegateForFunctionPointer<CreateView>(api.CreateView)(profile, ref config, ref callbacks, out ulong view);
         if (result != 0) Status = $"view error {result}";
         return result == 0 ? view : 0;
@@ -148,7 +182,11 @@ internal sealed class EngineBridge : IDisposable
     public void Navigate(ulong view, string input)
     {
         if (view == 0 || api.Navigate == 0 || string.IsNullOrWhiteSpace(input)) return;
-        string uri = input.Contains("://") ? input : $"https://{input}";
+        input = input.Trim();
+        string uri = input.Contains("://") ? input
+            : input.Contains(' ') || !input.Contains('.')
+                ? $"https://www.google.com/search?q={Uri.EscapeDataString(input)}"
+                : $"https://{input}";
         nint memory = Marshal.StringToCoTaskMemUTF8(uri);
         try {
             var bytes = new Bytes { Data = memory, Length = (nuint)System.Text.Encoding.UTF8.GetByteCount(uri) };
@@ -166,6 +204,95 @@ internal sealed class EngineBridge : IDisposable
     public void GoForward(ulong view) => Command(view, api.GoForward);
     public void Reload(ulong view) => Command(view, api.Reload);
     public void Stop(ulong view) => Command(view, api.Stop);
+    public void SetZoom(ulong view, double zoom)
+    {
+        if (view != 0 && api.SetZoom != 0)
+            Marshal.GetDelegateForFunctionPointer<SetZoom>(api.SetZoom)(view, Math.Clamp(zoom, .5, 5));
+    }
+
+    private JsonElement? JsonControl(nint function, object request)
+    {
+        if (profile == 0 || function == 0 || api.FreeBytes == 0) return null;
+        byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(request);
+        nint memory = Marshal.AllocHGlobal(encoded.Length);
+        try {
+            Marshal.Copy(encoded, 0, memory, encoded.Length);
+            var input = new Bytes { Data = memory, Length = (nuint)encoded.Length };
+            int result = Marshal.GetDelegateForFunctionPointer<ProfileJson>(function)(
+                profile, input, out OwnedBytes output);
+            if (result != 0 || output.Data == 0) return null;
+            try {
+                byte[] response = new byte[checked((int)output.Length)];
+                Marshal.Copy(output.Data, response, 0, response.Length);
+                using var document = JsonDocument.Parse(response);
+                return document.RootElement.Clone();
+            } finally {
+                Marshal.GetDelegateForFunctionPointer<FreeOwnedBytes>(api.FreeBytes)(output);
+            }
+        } finally { Marshal.FreeHGlobal(memory); }
+    }
+
+    public IReadOnlyList<ExtensionAction> GetExtensionActions()
+    {
+        JsonElement? response = JsonControl(api.ExtensionControlJson, new { operation = "list" });
+        if (response is not { ValueKind: JsonValueKind.Array } list) return [];
+        return list.EnumerateArray().Where(item => item.TryGetProperty("action", out var action)
+                && action.ValueKind == JsonValueKind.Object)
+            .Select(item => new ExtensionAction(
+                item.GetProperty("id").GetString() ?? "",
+                item.GetProperty("action").TryGetProperty("default_title", out var title)
+                    ? title.GetString() ?? item.GetProperty("name").GetString() ?? "Extension"
+                    : item.GetProperty("name").GetString() ?? "Extension"))
+            .Where(item => item.Id.Length != 0).ToArray();
+    }
+
+    public string? GetExtensionPopup(string id)
+    {
+        JsonElement? response = JsonControl(api.ExtensionControlJson, new { operation = "getAction", id });
+        return response is { } action && action.TryGetProperty("popup", out var popup)
+            ? popup.GetString() : null;
+    }
+
+    public bool InstallExtension(string path)
+        => JsonControl(api.ExtensionControlJson, new { operation = "installPackage", path }) is not null;
+
+    public bool AddBookmark(string title, string url)
+        => JsonControl(api.BrowserControlJson, new {
+            method = "addBookmark", title, url, folder = "",
+            createdAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        }) is not null;
+
+    public void ReportMemory()
+        => JsonControl(api.BrowserControlJson, new {
+            method = "reportMemory",
+            residentBytes = (ulong)Math.Max(0, Environment.WorkingSet),
+        });
+
+    public string LibrarySummary()
+    {
+        static string Lines(JsonElement? value, Func<JsonElement, string> format)
+            => value is { ValueKind: JsonValueKind.Array } array
+                ? string.Join(Environment.NewLine, array.EnumerateArray().Take(20).Select(format))
+                : "None";
+        string bookmarks = Lines(JsonControl(api.BrowserControlJson, new { method = "listBookmarks" }),
+            item => $"★ {item.GetProperty("title").GetString()} — {item.GetProperty("url").GetString()}");
+        string history = Lines(JsonControl(api.BrowserControlJson, new { method = "queryHistory", limit = 20 }),
+            item => $"• {item.GetProperty("title").GetString()} — {item.GetProperty("url").GetString()}");
+        string downloads = Lines(JsonControl(api.BrowserControlJson, new { method = "listDownloads" }),
+            item => $"↓ {item.GetProperty("suggestedFilename").GetString()} ({item.GetProperty("status").GetString()})");
+        return $"Bookmarks\n{bookmarks}\n\nRecent history\n{history}\n\nDownloads\n{downloads}";
+    }
+
+    private void OnNativeEvent(nint userData, nint pointer)
+    {
+        if (pointer == 0) return;
+        var nativeEvent = Marshal.PtrToStructure<NativeEvent>(pointer);
+        string text = nativeEvent.Text.Data == 0 || nativeEvent.Text.Length == 0
+            ? ""
+            : Marshal.PtrToStringUTF8(nativeEvent.Text.Data, checked((int)nativeEvent.Text.Length)) ?? "";
+        EventReceived?.Invoke(new EngineEvent(
+            nativeEvent.Kind, nativeEvent.View, text, nativeEvent.Value));
+    }
 
     public void Dispose()
     {

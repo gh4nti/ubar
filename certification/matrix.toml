@@ -1,0 +1,46 @@
+schema = 1
+
+[required]
+architectures = ["x86_64", "aarch64"]
+security = ["renderer_escape", "cross_site_storage", "private_persistence", "privileged_ipc"]
+performance = ["five_tab_rss_bytes", "startup_ms", "background_cpu_percent"]
+media = ["youtube_720p_average_fps", "youtube_720p_dropped_frames_percent", "hardware_decode"]
+graphics = ["gpu_compositing", "webgl2", "canvas_acceleration", "video_decode"]
+
+[[machine]]
+id = "linux-low-memory-arm64"
+os = "linux"
+arch = "aarch64"
+ram_bytes = 536870912
+required = true
+
+[[machine]]
+id = "linux-low-memory-x64"
+os = "linux"
+arch = "x86_64"
+ram_bytes = 536870912
+required = true
+
+[[machine]]
+id = "windows-x64-gpu"
+os = "windows"
+arch = "x86_64"
+required = true
+
+[[machine]]
+id = "windows-arm64-gpu"
+os = "windows"
+arch = "aarch64"
+required = true
+
+[[machine]]
+id = "macos-intel"
+os = "macos"
+arch = "x86_64"
+required = true
+
+[[machine]]
+id = "macos-apple-silicon"
+os = "macos"
+arch = "aarch64"
+required = true

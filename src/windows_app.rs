@@ -2,22 +2,34 @@ use crate::state::BrowserState;
 use chrono::Utc;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
-use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
-use webview2_com::TrySuspendCompletedHandler;
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+    ICoreWebView2_3, ICoreWebView2_4, ICoreWebView2DownloadOperation,
+};
+use webview2_com::{
+    BytesReceivedChangedEventHandler, DownloadStartingEventHandler, StateChangedEventHandler,
+    TrySuspendCompletedHandler, take_pwstr,
+};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR, PWSTR, w};
 use windows::Win32::{
     Foundation::HWND,
-    UI::WindowsAndMessaging::{HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos},
+    UI::{
+        Shell::ShellExecuteW,
+        WindowsAndMessaging::{
+            HWND_TOP, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        },
+    },
 };
 use wry::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use wry::http::{Request, Response, StatusCode, header::CONTENT_TYPE};
@@ -42,6 +54,9 @@ enum UserEvent {
     Loaded(u64, String),
     Title(u64, String),
     SuspendCompleted(u64, bool),
+    DownloadsChanged,
+    DownloadProgress(u64, u64, u64),
+    DownloadEnded(u64, bool),
     ExtensionsChanged,
     Exit,
 }
@@ -85,6 +100,8 @@ struct App {
     benchmark_restore_started: Option<std::time::Instant>,
     benchmark_restore_completed: Option<std::time::Instant>,
     benchmark_reported: bool,
+    download_operations: Rc<RefCell<BTreeMap<u64, ICoreWebView2DownloadOperation>>>,
+    cancel_requested: HashSet<u64>,
 }
 
 fn benchmark_urls() -> Vec<String> {
@@ -150,11 +167,11 @@ window.addEventListener('keydown', event => {
   }
   if (!event.ctrlKey) return;
   const key = event.key.toLowerCase();
-  if (['l','t','w','r','d','+','=','-','0'].includes(key)) {
+  if (['l','t','w','r','d','+','=','-','0','tab','1','2','3','4','5','6','7','8','9'].includes(key)) {
     event.preventDefault();
-    window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key}));
+    window.ipc.postMessage(JSON.stringify({cmd:'shortcut',key,shift:event.shiftKey}));
   }
-});
+}, true);
 window.webkit = window.webkit || {};
 window.webkit.messageHandlers = window.webkit.messageHandlers || {};
 window.webkit.messageHandlers.ubar = {
@@ -264,6 +281,16 @@ fn raise_webview(webview: &WebView) {
     }
 }
 
+fn download_directory(state: &BrowserState) -> PathBuf {
+    if state.settings.download_dir.is_empty() {
+        dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        PathBuf::from(&state.settings.download_dir)
+    }
+}
+
 fn make_tab(
     window: &Window,
     proxy: &EventLoopProxy<UserEvent>,
@@ -271,12 +298,17 @@ fn make_tab(
     id: u64,
     uri: &str,
     incognito: bool,
+    download_operations: &Rc<RefCell<BTreeMap<u64, ICoreWebView2DownloadOperation>>>,
 ) -> wry::Result<Tab> {
     let ipc_proxy = proxy.clone();
     let load_proxy = proxy.clone();
     let title_proxy = proxy.clone();
     let download_proxy = proxy.clone();
+    let download_start_proxy = proxy.clone();
     let download_state = state.clone();
+    let download_start_state = state.clone();
+    let native_tracking = Rc::new(Cell::new(false));
+    let completion_has_native_tracking = native_tracking.clone();
     let initial_zoom = state.borrow().zoom_for_uri(uri);
     let store_identity_script = crate::store_identity::navigator_override_script();
     let builder = WebViewBuilder::new()
@@ -302,36 +334,189 @@ fn make_tab(
         .with_document_title_changed_handler(move |title| {
             let _ = title_proxy.send_event(UserEvent::Title(id, title));
         })
+        .with_download_started_handler(move |uri, path| {
+            let mut directory = download_directory(&download_start_state.borrow());
+            if fs::create_dir_all(&directory).is_err() {
+                return false;
+            }
+            let Ok(absolute) = directory.canonicalize() else {
+                return false;
+            };
+            directory = absolute;
+            let filename = path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("download"));
+            let mut destination = directory.join(filename);
+            let stem = destination.file_stem().unwrap_or_default().to_os_string();
+            let extension = destination.extension().map(|value| value.to_os_string());
+            for suffix in 1.. {
+                if !destination.exists() {
+                    *path = destination;
+                    if !incognito {
+                        let filename = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "download".into());
+                        let mut state = download_start_state.borrow_mut();
+                        state.add_download(
+                            &uri,
+                            &path.to_string_lossy(),
+                            &filename,
+                            Utc::now().timestamp(),
+                        );
+                        state.save();
+                        drop(state);
+                        let _ = download_start_proxy.send_event(UserEvent::DownloadsChanged);
+                    }
+                    return true;
+                }
+                let mut name = stem.clone();
+                name.push(format!(" ({suffix})"));
+                destination = directory.join(name);
+                if let Some(extension) = &extension {
+                    destination.set_extension(extension);
+                }
+            }
+            false
+        })
         .with_download_completed_handler(move |uri, path, success| {
-            let Some(path) = path else { return };
             if incognito {
                 return;
             }
             let filename = path
-                .file_name()
+                .as_ref()
+                .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "download".into());
             let mut state = download_state.borrow_mut();
-            let download_id = state.add_download(
-                &uri,
-                &path.to_string_lossy(),
-                &filename,
-                Utc::now().timestamp(),
-            );
+            let existing = state
+                .downloads
+                .iter()
+                .find(|entry| {
+                    path.as_ref()
+                        .is_some_and(|path| entry.destination == path.to_string_lossy())
+                })
+                .map(|entry| entry.id)
+                .or_else(|| {
+                    let mut matches = state
+                        .downloads
+                        .iter()
+                        .filter(|entry| entry.status == "active" && entry.uri == uri);
+                    let first = matches.next()?.id;
+                    matches.next().is_none().then_some(first)
+                });
+            if existing.is_none() && path.is_none() && !completion_has_native_tracking.get() {
+                // Old runtimes lack exact native operation IDs. Fail all ambiguous matches
+                // conservatively instead of inventing a duplicate or leaving them active.
+                let mut changed = false;
+                for entry in state
+                    .downloads
+                    .iter_mut()
+                    .filter(|entry| entry.status == "active" && entry.uri == uri)
+                {
+                    entry.status = "failed".into();
+                    changed = true;
+                }
+                if changed {
+                    state.save();
+                    drop(state);
+                    let _ = download_proxy.send_event(UserEvent::DownloadsChanged);
+                }
+                return;
+            }
+            // A pathless callback cannot identify one of several same-URI downloads.
+            // The native operation state callback below owns that exact-ID resolution.
+            let Some(download_id) = existing else { return };
             if let Some(entry) = state.download_mut(download_id) {
-                entry.status = if success { "finished" } else { "failed" }.into();
+                if entry.status != "cancelled" {
+                    entry.status = if success { "done" } else { "failed" }.into();
+                }
             }
             state.save();
             drop(state);
+            let _ = download_proxy.send_event(UserEvent::DownloadsChanged);
             let lower = filename.to_ascii_lowercase();
             if success
                 && (lower.ends_with(".xpi") || lower.ends_with(".crx"))
-                && crate::extensions::install_file(&path).is_ok()
+                && path.as_ref().is_some_and(|path| crate::extensions::install_file(path).is_ok())
             {
                 let _ = download_proxy.send_event(UserEvent::ExtensionsChanged);
             }
         });
     let webview = builder.build_as_child(window)?;
+    if !incognito {
+        let Ok(native) = webview.webview().cast::<ICoreWebView2_4>() else {
+            let _ = webview.zoom(initial_zoom);
+            return Ok(Tab {
+                id,
+                webview,
+                uri: uri.into(),
+                title: "New Tab".into(),
+                incognito,
+                zoom: initial_zoom,
+                lifecycle: TabLifecycle::Active,
+                loaded: false,
+            });
+        };
+        let tracked = download_operations.clone();
+        let observed_state = state.clone();
+        let observed_proxy = proxy.clone();
+        let handler = DownloadStartingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let operation = unsafe { args.DownloadOperation()? };
+            let mut path = PWSTR::null();
+            let path = if unsafe { args.ResultFilePath(&mut path) }.is_ok() {
+                take_pwstr(path)
+            } else {
+                String::new()
+            };
+            let state = observed_state.borrow();
+            let id = state.downloads.iter()
+                .find(|entry| entry.status == "active" && entry.destination == path)
+                .map(|entry| entry.id);
+            drop(state);
+            let Some(id) = id else { return Ok(()) };
+            tracked.borrow_mut().insert(id, operation.clone());
+
+            let progress_proxy = observed_proxy.clone();
+            let mut progress_token = 0;
+            unsafe { operation.add_BytesReceivedChanged(
+                &BytesReceivedChangedEventHandler::create(Box::new(move |operation, _| {
+                    let Some(operation) = operation else { return Ok(()) };
+                    let mut received = 0i64;
+                    let mut total = 0i64;
+                    unsafe {
+                        operation.BytesReceived(&mut received)?;
+                        operation.TotalBytesToReceive(&mut total)?;
+                    }
+                    let _ = progress_proxy.send_event(UserEvent::DownloadProgress(
+                        id, received.max(0) as u64, total.max(0) as u64,
+                    ));
+                    Ok(())
+                })),
+                &mut progress_token,
+            )?; }
+
+            let end_proxy = observed_proxy.clone();
+            let mut state_token = 0;
+            unsafe { operation.add_StateChanged(
+                &StateChangedEventHandler::create(Box::new(move |operation, _| {
+                    let Some(operation) = operation else { return Ok(()) };
+                    let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+                    unsafe { operation.State(&mut state)?; }
+                    if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+                        let _ = end_proxy.send_event(UserEvent::DownloadEnded(
+                            id,
+                            state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
+                        ));
+                    }
+                    Ok(())
+                })),
+                &mut state_token,
+            )?; }
+            Ok(())
+        }));
+        let mut token = 0;
+        native_tracking.set(unsafe { native.add_DownloadStarting(&handler, &mut token) }.is_ok());
+    }
     let _ = webview.zoom(initial_zoom);
 
     Ok(Tab {
@@ -441,7 +626,8 @@ impl App {
         };
         let id = self.next_id;
         self.next_id += 1;
-        match make_tab(window, &self.proxy, &self.state, id, &uri, incognito) {
+        match make_tab(window, &self.proxy, &self.state, id, &uri, incognito,
+                       &self.download_operations) {
             Ok(tab) => {
                 if let Some(active) = self.tabs.get(self.active) {
                     let _ = active.webview.set_visible(false);
@@ -497,6 +683,47 @@ impl App {
         let _ = self.tabs[index].webview.set_visible(true);
         let _ = self.tabs[index].webview.focus();
         self.sync_toolbar();
+    }
+
+    fn move_tab(&mut self, id: u64, target_id: u64, after: bool) {
+        let Some(source) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        let active_id = self.tabs[self.active].id;
+        let tab = self.tabs.remove(source);
+        let insertion = target + usize::from(after);
+        let destination = (insertion - usize::from(source < insertion)).min(self.tabs.len());
+        self.tabs.insert(destination, tab);
+        self.active = self.tabs.iter().position(|tab| tab.id == active_id).unwrap_or(0);
+        self.sync_toolbar();
+        self.save_session();
+    }
+
+    fn switch_tab_shortcut(&mut self, key: &str, shift: bool) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let index = if key == "tab" {
+            if shift {
+                self.active.checked_sub(1).unwrap_or(self.tabs.len() - 1)
+            } else {
+                (self.active + 1) % self.tabs.len()
+            }
+        } else if key == "9" {
+            self.tabs.len() - 1
+        } else {
+            let Some(index) = key.as_bytes().first()
+                .and_then(|key| key.checked_sub(b'1')).map(usize::from) else { return };
+            if index >= self.tabs.len() { return; }
+            index
+        };
+        self.select_tab(self.tabs[index].id);
     }
 
     fn navigate(&self, input: &str) {
@@ -645,6 +872,11 @@ impl App {
             state.save();
             drop(state);
             self.render_internal(tab.id);
+        } else if message == "downloads-folder" {
+            let directory = download_directory(&self.state.borrow());
+            if fs::create_dir_all(&directory).is_ok() {
+                let _ = Command::new("explorer.exe").arg(directory).spawn();
+            }
         } else if let Some(name) = message.strip_prefix("delete-extension:") {
             let extensions = crate::extensions::load();
             if crate::extensions::uninstall(&percent_decode(name), &extensions) {
@@ -688,6 +920,18 @@ impl App {
             zoom,
             serde_json::to_string(&extensions).unwrap()
         ));
+        let state = self.state.borrow();
+        let downloads = state.downloads.iter().take(6).map(|entry| serde_json::json!({
+                "id": entry.id,
+                "filename": entry.filename,
+                "status": entry.status,
+                "received": entry.received,
+                "total": entry.total,
+                "destination": entry.destination
+            })).collect::<Vec<_>>();
+        drop(state);
+        self.toolbar_eval(&format!("window.ubarRenderDownloads({});",
+            serde_json::to_string(&downloads).unwrap()));
     }
 
     fn handle_command(&mut self, id: Option<u64>, message: &str) {
@@ -695,6 +939,7 @@ impl App {
             return;
         };
         let command = value["cmd"].as_str().unwrap_or("");
+        let toolbar_request = id.is_none();
         let target = id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(self.active);
@@ -718,6 +963,40 @@ impl App {
             "open-extension" => {
                 if let Some(uri) = value["value"].as_str() {
                     self.open_internal_page(uri);
+                }
+            }
+            "download-cancel" if toolbar_request => {
+                if let Some(id) = value["id"].as_u64()
+                    && let Some(operation) = self.download_operations.borrow().get(&id).cloned()
+                    && unsafe { operation.Cancel() }.is_ok()
+                {
+                    self.cancel_requested.insert(id);
+                }
+            }
+            "download-open" | "download-show" if toolbar_request => {
+                let Some(id) = value["id"].as_u64() else { return };
+                let destination = self.state.borrow().downloads.iter()
+                    .find(|entry| entry.id == id && entry.status == "done")
+                    .map(|entry| entry.destination.clone());
+                let Some(destination) = destination else { return };
+                let path = PathBuf::from(destination);
+                if !path.is_file() { return; }
+                let mut command = Command::new("explorer.exe");
+                if value["cmd"] == "download-show" {
+                    command.arg(format!("/select,{}", path.display()));
+                    let _ = command.spawn();
+                } else {
+                    let wide = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            w!("open"),
+                            PCWSTR(wide.as_ptr()),
+                            PCWSTR::null(),
+                            PCWSTR::null(),
+                            SW_SHOWNORMAL,
+                        );
+                    }
                 }
             }
             "incognito" => self.open_private_window(),
@@ -818,6 +1097,13 @@ document.documentElement.append(style);
                     self.select_tab(id);
                 }
             }
+            "move-tab" => {
+                if let (Some(id), Some(target_id)) =
+                    (value["id"].as_u64(), value["target"].as_u64())
+                {
+                    self.move_tab(id, target_id, value["after"].as_bool().unwrap_or(false));
+                }
+            }
             "bookmark" => {
                 let tab = &self.tabs[target];
                 self.state.borrow_mut().toggle_bookmark(
@@ -832,6 +1118,9 @@ document.documentElement.append(style);
             "zoom-reset" => self.set_zoom(crate::zoom::DEFAULT_ZOOM),
             "devtools" => self.tabs[target].webview.open_devtools(),
             "shortcut" => match value["key"].as_str().unwrap_or("") {
+                key @ ("tab" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9") => {
+                    self.switch_tab_shortcut(key, value["shift"].as_bool().unwrap_or(false));
+                }
                 "l" => self.toolbar_eval("window.ubarFocusAddress()"),
                 "t" => self.add_tab(self.new_tab_uri.clone()),
                 "w" => self.close_tab(self.tabs[target].id),
@@ -1108,6 +1397,54 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            UserEvent::DownloadsChanged => {
+                let pages = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.uri.contains("/pages/downloads/"))
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>();
+                for id in pages {
+                    self.render_internal(id);
+                }
+                self.sync_toolbar();
+            }
+            UserEvent::DownloadProgress(id, received, total) => {
+                if let Some(entry) = self.state.borrow_mut().download_mut(id)
+                    && entry.status == "active"
+                {
+                    entry.received = received;
+                    entry.total = total;
+                }
+                let pages = self.tabs.iter()
+                    .filter(|tab| tab.uri.contains("/pages/downloads/"))
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>();
+                for id in pages { self.render_internal(id); }
+                self.sync_toolbar();
+            }
+            UserEvent::DownloadEnded(id, completed) => {
+                self.download_operations.borrow_mut().remove(&id);
+                let cancelled = self.cancel_requested.remove(&id);
+                let mut state = self.state.borrow_mut();
+                if let Some(entry) = state.download_mut(id) {
+                    entry.status = if cancelled {
+                        "cancelled"
+                    } else if completed {
+                        "done"
+                    } else {
+                        "failed"
+                    }.into();
+                }
+                state.save();
+                drop(state);
+                let pages = self.tabs.iter()
+                    .filter(|tab| tab.uri.contains("/pages/downloads/"))
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>();
+                for id in pages { self.render_internal(id); }
+                self.sync_toolbar();
+            }
             UserEvent::ExtensionsChanged => {
                 self.sync_toolbar();
                 let ids = self
@@ -1132,6 +1469,17 @@ pub fn run() {
         .build()
         .expect("create event loop");
     let proxy = event_loop.create_proxy();
+    let mut browser_state = BrowserState::load();
+    let mut recovered_download = false;
+    for download in &mut browser_state.downloads {
+        if download.status == "active" {
+            download.status = "interrupted".into();
+            recovered_download = true;
+        }
+    }
+    if recovered_download {
+        browser_state.save();
+    }
     let mut app = App {
         proxy,
         window: None,
@@ -1140,7 +1488,7 @@ pub fn run() {
         active: 0,
         next_id: 1,
         menu_open: false,
-        state: Rc::new(RefCell::new(BrowserState::load())),
+        state: Rc::new(RefCell::new(browser_state)),
         new_tab_uri: NEW_TAB_URI.into(),
         memory_policy: crate::memory_policy::MemoryPolicy::detect(),
         private_window,
@@ -1153,6 +1501,8 @@ pub fn run() {
         benchmark_restore_started: None,
         benchmark_restore_completed: None,
         benchmark_reported: false,
+        download_operations: Rc::new(RefCell::new(BTreeMap::new())),
+        cancel_requested: HashSet::new(),
     };
     event_loop.run_app(&mut app).expect("run ubar");
 }

@@ -34,6 +34,7 @@ pub enum UbarEventKind {
     PermissionRequested = 6,
     DownloadRequested = 7,
     MemoryChanged = 8,
+    ExtensionMessage = 9,
 }
 
 #[repr(C)]
@@ -114,6 +115,11 @@ pub type ViewBoolFn = unsafe extern "C" fn(view: u64, value: bool) -> UbarResult
 pub type ViewF64Fn = unsafe extern "C" fn(view: u64, value: f64) -> UbarResult;
 pub type ViewFn = unsafe extern "C" fn(view: u64) -> UbarResult;
 pub type ProfileBytesFn = unsafe extern "C" fn(profile: u64, value: UbarBytes) -> UbarResult;
+pub type ProfileJsonFn = unsafe extern "C" fn(
+    profile: u64,
+    request_json_utf8: UbarBytes,
+    response_json_utf8_out: *mut UbarOwnedBytes,
+) -> UbarResult;
 pub type RegisterCdmFn = unsafe extern "C" fn(
     profile: u64,
     key_system_utf8: UbarBytes,
@@ -144,6 +150,8 @@ pub struct UbarEngineApiV1 {
     pub go_forward: ViewFn,
     pub reload: ViewFn,
     pub stop: ViewFn,
+    pub extension_control_json: ProfileJsonFn,
+    pub browser_control_json: ProfileJsonFn,
 }
 
 // The table is immutable after construction. Its raw pointer targets a static,
@@ -161,7 +169,7 @@ impl UbarProfileConfigV1 {
             data_directory_utf8: UbarBytes::default(),
             cache_directory_utf8: UbarBytes::default(),
             memory_target_bytes: 1024 * 1024 * 1024,
-            memory_ceiling_bytes: 1024 * 1024 * 1024,
+            memory_ceiling_bytes: 1280 * 1024 * 1024,
             partition_third_party_storage: true,
             block_third_party_cookies: true,
             require_sandbox: true,

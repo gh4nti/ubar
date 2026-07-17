@@ -4,6 +4,10 @@ const add = document.getElementById('new');
 const dragRegion = document.getElementById('drag-region');
 const address = document.getElementById('address');
 const bookmark = document.getElementById('bookmark');
+const downloadButton = document.getElementById('downloads');
+const downloadPanel = document.getElementById('downloads-panel');
+const downloadList = document.getElementById('downloads-list');
+const downloadAll = document.getElementById('downloads-all');
 const extensionActions = document.getElementById('extension-actions');
 const more = document.getElementById('more');
 const menu = document.getElementById('app-menu');
@@ -12,6 +16,13 @@ const hideMenu = () => {
   if (menu.hidden) return;
   menu.hidden = true;
   more.classList.remove('active');
+  send({cmd: 'menu-close'});
+};
+const hideDownloads = () => {
+  if (downloadPanel.hidden) return;
+  downloadPanel.hidden = true;
+  downloadButton.classList.remove('active');
+  downloadButton.setAttribute('aria-expanded', 'false');
   send({cmd: 'menu-close'});
 };
 const toggleMenu = () => {
@@ -31,7 +42,25 @@ add.addEventListener('click', () => send({cmd: 'new-tab'}));
 bookmark.addEventListener('click', () => send({cmd: 'bookmark'}));
 more.addEventListener('click', event => {
   event.stopPropagation();
+  hideDownloads();
   toggleMenu();
+});
+downloadButton.addEventListener('click', event => {
+  event.stopPropagation();
+  if (downloadPanel.hidden) {
+    hideMenu();
+    downloadPanel.hidden = false;
+    downloadButton.classList.add('active');
+    downloadButton.setAttribute('aria-expanded', 'true');
+    send({cmd: 'menu-open'});
+  } else {
+    hideDownloads();
+  }
+});
+downloadPanel.addEventListener('click', event => event.stopPropagation());
+downloadAll.addEventListener('click', () => {
+  hideDownloads();
+  send({cmd: 'open-page', value: 'downloads'});
 });
 menu.addEventListener('click', event => event.stopPropagation());
 menu.querySelectorAll('[data-page]').forEach(button => {
@@ -40,7 +69,7 @@ menu.querySelectorAll('[data-page]').forEach(button => {
 menu.querySelectorAll('[data-command]').forEach(button => {
   button.addEventListener('click', () => choose({cmd: button.dataset.command}));
 });
-document.addEventListener('click', hideMenu);
+document.addEventListener('click', () => { hideMenu(); hideDownloads(); });
 address.addEventListener('keydown', event => {
   if (event.key === 'Enter') send({cmd: 'navigate', value: address.value});
 });
@@ -54,6 +83,12 @@ window.addEventListener('keydown', event => {
     return;
   }
   if (!event.ctrlKey) return;
+  const key = event.key.toLowerCase();
+  if (key === 'tab' || /^[1-9]$/.test(key)) {
+    event.preventDefault();
+    send({cmd: 'shortcut', key, shift: event.shiftKey});
+    return;
+  }
   const commands = {
     l: () => window.ubarFocusAddress(),
     t: () => send({cmd: 'new-tab'}),
@@ -83,7 +118,36 @@ window.ubarRender = (items, uri, bookmarked, zoom = 1, extensions = []) => {
     const title = `${item.incognito ? 'Private - ' : ''}${item.title || 'New Tab'}`;
     tab.querySelector('.title').textContent = title;
     tab.title = title;
-    tab.addEventListener('click', () => send({cmd: 'select-tab', id: item.id}));
+    tab.draggable = true;
+    let suppressClickUntil = 0;
+    tab.addEventListener('dragstart', event => {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', String(item.id));
+      tab.classList.add('dragging');
+    });
+    tab.addEventListener('dragend', () => {
+      tab.classList.remove('dragging');
+      suppressClickUntil = performance.now() + 250;
+    });
+    tab.addEventListener('dragover', event => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    });
+    tab.addEventListener('drop', event => {
+      event.preventDefault();
+      const id = Number(event.dataTransfer.getData('text/plain'));
+      if (Number.isSafeInteger(id) && id !== item.id) {
+        send({cmd: 'move-tab', id, target: item.id,
+          after: event.clientX >= tab.getBoundingClientRect().left + tab.offsetWidth / 2});
+      }
+    });
+    tab.addEventListener('click', event => {
+      if (performance.now() < suppressClickUntil) {
+        event.preventDefault();
+        return;
+      }
+      send({cmd: 'select-tab', id: item.id});
+    });
     tab.addEventListener('auxclick', event => {
       if (event.button === 1) {
         event.preventDefault();
@@ -108,6 +172,48 @@ window.ubarRender = (items, uri, bookmarked, zoom = 1, extensions = []) => {
     button.title = extension.name;
     button.addEventListener('click', () => send({cmd: 'open-extension', value: extension.page}));
     extensionActions.append(button);
+  }
+};
+
+window.ubarRenderDownloads = items => {
+  downloadButton.hidden = items.length === 0;
+  if (!items.length) hideDownloads();
+  downloadList.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'download-item';
+    const name = document.createElement('div');
+    name.className = 'download-name';
+    name.textContent = item.filename || 'download';
+    name.title = name.textContent;
+    const status = document.createElement('div');
+    status.className = 'download-state';
+    if (item.status === 'active' && item.total > 0) {
+      const percent = Math.min(100, Math.round(item.received * 100 / item.total));
+      status.textContent = `${percent}%`;
+      const progress = document.createElement('progress');
+      progress.max = item.total;
+      progress.value = item.received;
+      status.prepend(progress);
+    } else {
+      status.textContent = item.status === 'active' ? 'Downloading' :
+        item.status === 'done' ? 'Complete' : item.status;
+    }
+    const actions = document.createElement('div');
+    actions.className = 'download-actions';
+    const action = (label, cmd) => {
+      const button = document.createElement('button');
+      button.textContent = label;
+      button.addEventListener('click', () => send({cmd, id: item.id}));
+      actions.append(button);
+    };
+    if (item.status === 'active') action('Cancel', 'download-cancel');
+    if (item.status === 'done') {
+      action('Open', 'download-open');
+      action('Show', 'download-show');
+    }
+    row.append(name, status, actions);
+    downloadList.append(row);
   }
 };
 

@@ -1,3 +1,4 @@
+use crate::manifest::NormalizedManifest;
 use crate::runtime::{ExtensionId, ProfileScope};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +76,8 @@ pub struct PermissionGrant {
     pub optional_apis: BTreeSet<String>,
     pub required_origins: BTreeSet<MatchPattern>,
     pub optional_origins: BTreeSet<MatchPattern>,
+    declared_optional_apis: BTreeSet<String>,
+    declared_optional_origins: BTreeSet<MatchPattern>,
 }
 
 impl PermissionGrant {
@@ -85,6 +88,12 @@ impl PermissionGrant {
     pub fn allows_url(&self, url: &str) -> bool {
         self.required_origins.iter().chain(&self.optional_origins).any(|p| p.matches(url))
     }
+
+    pub fn contains_origin(&self, origin: &str) -> bool {
+        MatchPattern::parse(origin).is_ok_and(|pattern| {
+            self.required_origins.contains(&pattern) || self.optional_origins.contains(&pattern)
+        })
+    }
 }
 
 #[derive(Default)]
@@ -93,6 +102,28 @@ pub struct PermissionStore {
 }
 
 impl PermissionStore {
+    pub fn install_manifest(
+        &mut self,
+        extension: ExtensionId,
+        profile: ProfileScope,
+        manifest: &NormalizedManifest,
+    ) -> Result<(), String> {
+        let required_origins = manifest.host_permissions.iter()
+            .map(|value| MatchPattern::parse(value)).collect::<Result<_, _>>()?;
+        let declared_optional_origins = manifest.optional_host_permissions.iter()
+            .map(|value| MatchPattern::parse(value)).collect::<Result<_, _>>()?;
+        self.grants.insert((extension, profile), PermissionGrant {
+            required_apis: manifest.permissions.iter()
+                .filter(|value| !is_origin(value)).cloned().collect(),
+            required_origins,
+            declared_optional_apis: manifest.optional_permissions.iter()
+                .filter(|value| !is_origin(value)).cloned().collect(),
+            declared_optional_origins,
+            ..PermissionGrant::default()
+        });
+        Ok(())
+    }
+
     pub fn install(
         &mut self,
         extension: ExtensionId,
@@ -110,8 +141,11 @@ impl PermissionStore {
         Ok(())
     }
 
-    pub fn grant_optional_api(&mut self, extension: &ExtensionId, profile: ProfileScope, api: String) {
-        self.grants.entry((extension.clone(), profile)).or_default().optional_apis.insert(api);
+    pub fn grant_optional_api(&mut self, extension: &ExtensionId, profile: ProfileScope, api: String) -> Result<(), String> {
+        let grant = self.grants.get_mut(&(extension.clone(), profile)).ok_or("extension is not installed")?;
+        if !grant.declared_optional_apis.contains(&api) { return Err("optional API was not declared".into()); }
+        grant.optional_apis.insert(api);
+        Ok(())
     }
 
     pub fn grant_optional_origin(
@@ -120,8 +154,12 @@ impl PermissionStore {
         profile: ProfileScope,
         origin: &str,
     ) -> Result<(), String> {
-        self.grants.entry((extension.clone(), profile)).or_default()
-            .optional_origins.insert(MatchPattern::parse(origin)?);
+        let pattern = MatchPattern::parse(origin)?;
+        let grant = self.grants.get_mut(&(extension.clone(), profile)).ok_or("extension is not installed")?;
+        if !grant.declared_optional_origins.contains(&pattern) {
+            return Err("optional origin was not declared".into());
+        }
+        grant.optional_origins.insert(pattern);
         Ok(())
     }
 
@@ -132,6 +170,20 @@ impl PermissionStore {
         }
     }
 
+    pub fn revoke_optional_api(&mut self, extension: &ExtensionId, profile: ProfileScope, api: &str) {
+        if let Some(grant) = self.grants.get_mut(&(extension.clone(), profile)) {
+            grant.optional_apis.remove(api);
+        }
+    }
+
+    pub fn revoke_optional_origin(&mut self, extension: &ExtensionId, profile: ProfileScope, origin: &str) {
+        if let (Some(grant), Ok(pattern)) = (
+            self.grants.get_mut(&(extension.clone(), profile)), MatchPattern::parse(origin),
+        ) {
+            grant.optional_origins.remove(&pattern);
+        }
+    }
+
     pub fn get(&self, extension: &ExtensionId, profile: ProfileScope) -> Option<&PermissionGrant> {
         self.grants.get(&(extension.clone(), profile))
     }
@@ -139,4 +191,10 @@ impl PermissionStore {
     pub fn drop_private_profile(&mut self, private_id: u64) {
         self.grants.retain(|(_, profile), _| *profile != ProfileScope::Private(private_id));
     }
+
+    pub fn uninstall(&mut self, extension: &ExtensionId, profile: ProfileScope) {
+        self.grants.remove(&(extension.clone(), profile));
+    }
 }
+
+fn is_origin(value: &str) -> bool { value == "<all_urls>" || value.contains("://") }

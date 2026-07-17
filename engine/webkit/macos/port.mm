@@ -5,6 +5,10 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+
+@interface UbarExtensionMessageHandler : NSObject <WKScriptMessageHandler>
+@end
 
 namespace {
 
@@ -12,16 +16,21 @@ struct ProfileState {
     __strong WKProcessPool* processPool;
     __strong WKWebsiteDataStore* dataStore;
     __strong WKUserContentController* userContentController;
+    __strong UbarExtensionMessageHandler* extensionMessageHandler;
 };
 
-@interface UbarNavigationDelegate : NSObject <WKNavigationDelegate>
+@interface UbarNavigationDelegate : NSObject <WKNavigationDelegate, WKDownloadDelegate>
 @property(nonatomic) uint64_t viewID;
 @property(nonatomic) UbarCallbacksV1 callbacks;
+@property(nonatomic, strong) NSMapTable<WKDownload*, NSURL*>* downloadDestinations;
+@property(nonatomic, strong) NSHashTable<WKDownload*>* extensionDownloads;
 @end
 
 struct ViewState {
+    uint64_t profile;
     __strong WKWebView* webView;
     __strong UbarNavigationDelegate* delegate;
+    std::unordered_set<std::string> bridgeWorlds;
 };
 
 std::unordered_map<uint64_t, ProfileState> profiles;
@@ -39,9 +48,62 @@ void emit(UbarNavigationDelegate* delegate, UbarEventKind kind, NSString* text =
     delegate.callbacks.event(delegate.callbacks.user_data, &event);
 }
 
+void clear_extension_worlds(uint64_t viewID)
+{
+    auto found = views.find(viewID);
+    if (found == views.end()) return;
+    auto owner = profiles.find(found->second.profile);
+    if (owner == profiles.end()) return;
+    for (const auto& world : found->second.bridgeWorlds) {
+        NSString* name = [NSString stringWithUTF8String:world.c_str()];
+        [owner->second.userContentController removeScriptMessageHandlerForName:@"ubarExtensionBridge"
+            contentWorld:[WKContentWorld worldWithName:name]];
+    }
+    found->second.bridgeWorlds.clear();
+}
+
 @implementation UbarNavigationDelegate
+- (BOOL)isExtensionResponse:(NSURLResponse*)response suggestedFilename:(NSString*)suggestedFilename
+{
+    NSString* mime = response.MIMEType.lowercaseString;
+    NSString* extension = response.URL.pathExtension.lowercaseString;
+    NSString* suggestedExtension = suggestedFilename.pathExtension.lowercaseString;
+    return [mime isEqualToString:@"application/x-xpinstall"]
+        || [mime isEqualToString:@"application/x-chrome-extension"]
+        || [extension isEqualToString:@"xpi"] || [extension isEqualToString:@"crx"]
+        || [suggestedExtension isEqualToString:@"xpi"] || [suggestedExtension isEqualToString:@"crx"];
+}
+- (NSString*)safeDownloadFilename:(NSString*)suggestedFilename
+{
+    NSString* filename = suggestedFilename.lastPathComponent.length
+        ? suggestedFilename.lastPathComponent : @"download";
+    NSMutableCharacterSet* unsafe = [[NSCharacterSet controlCharacterSet] mutableCopy];
+    [unsafe addCharactersInString:@"/:\\?%*|\"<>"];
+    filename = [[filename componentsSeparatedByCharactersInSet:unsafe] componentsJoinedByString:@"_"];
+    filename = [filename stringByTrimmingCharactersInSet:
+        [NSCharacterSet characterSetWithCharactersInString:@". "]];
+    return filename.length ? filename : @"download";
+}
+- (NSURL*)collisionSafeDestinationInDirectory:(NSURL*)directory filename:(NSString*)filename
+{
+    NSFileManager* files = [NSFileManager defaultManager];
+    NSURL* candidate = [directory URLByAppendingPathComponent:filename];
+    if (![files fileExistsAtPath:candidate.path]) return candidate;
+    NSString* extension = filename.pathExtension;
+    NSString* stem = filename.stringByDeletingPathExtension;
+    for (NSUInteger suffix = 1; suffix < 10000; ++suffix) {
+        NSString* leaf = [NSString stringWithFormat:@"%@ (%lu)", stem, (unsigned long)suffix];
+        if (extension.length) leaf = [leaf stringByAppendingPathExtension:extension];
+        candidate = [directory URLByAppendingPathComponent:leaf];
+        if (![files fileExistsAtPath:candidate.path]) return candidate;
+    }
+    NSString* leaf = [NSString stringWithFormat:@"%@-%f", stem, NSDate.timeIntervalSinceReferenceDate];
+    if (extension.length) leaf = [leaf stringByAppendingPathExtension:extension];
+    return [directory URLByAppendingPathComponent:leaf];
+}
 - (void)webView:(WKWebView*)webView didStartProvisionalNavigation:(WKNavigation*)navigation
 {
+    clear_extension_worlds(self.viewID);
     emit(self, UBAR_NAVIGATION_STARTED, webView.URL.absoluteString);
 }
 - (void)webView:(WKWebView*)webView didCommitNavigation:(WKNavigation*)navigation
@@ -57,6 +119,84 @@ void emit(UbarNavigationDelegate* delegate, UbarEventKind kind, NSString* text =
 - (void)webViewWebContentProcessDidTerminate:(WKWebView*)webView
 {
     emit(self, UBAR_RENDERER_CRASHED);
+}
+- (void)webView:(WKWebView*)webView decidePolicyForNavigationAction:(WKNavigationAction*)action
+    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler
+{
+    decisionHandler(action.shouldPerformDownload
+        ? WKNavigationActionPolicyDownload : WKNavigationActionPolicyAllow);
+}
+- (void)webView:(WKWebView*)webView decidePolicyForNavigationResponse:(WKNavigationResponse*)response
+    decisionHandler:(void (^)(WKNavigationResponsePolicy))decisionHandler
+{
+    NSString* disposition = [response.response isKindOfClass:[NSHTTPURLResponse class]]
+        ? [(NSHTTPURLResponse*)response.response valueForHTTPHeaderField:@"Content-Disposition"] : nil;
+    BOOL attachment = [disposition.lowercaseString containsString:@"attachment"];
+    if (!response.canShowMIMEType || attachment
+        || [self isExtensionResponse:response.response
+            suggestedFilename:response.response.suggestedFilename])
+        decisionHandler(WKNavigationResponsePolicyDownload);
+    else
+        decisionHandler(WKNavigationResponsePolicyAllow);
+}
+- (void)webView:(WKWebView*)webView navigationAction:(WKNavigationAction*)action
+    didBecomeDownload:(WKDownload*)download
+{
+    download.delegate = self;
+}
+- (void)webView:(WKWebView*)webView navigationResponse:(WKNavigationResponse*)response
+    didBecomeDownload:(WKDownload*)download
+{
+    download.delegate = self;
+}
+- (void)download:(WKDownload*)download decideDestinationUsingResponse:(NSURLResponse*)response
+    suggestedFilename:(NSString*)suggestedFilename
+    completionHandler:(void (^)(NSURL* destination))completionHandler
+{
+    const BOOL extensionPackage = [self isExtensionResponse:response suggestedFilename:suggestedFilename];
+    NSURL* directory = nil;
+    if (extensionPackage) {
+        directory = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
+            URLByAppendingPathComponent:[[NSUUID UUID] UUIDString] isDirectory:YES];
+    } else {
+        directory = [[[NSFileManager defaultManager] URLsForDirectory:NSDownloadsDirectory
+            inDomains:NSUserDomainMask] firstObject];
+        if (!directory)
+            directory = [[NSURL fileURLWithPath:NSHomeDirectory() isDirectory:YES]
+                URLByAppendingPathComponent:@"Downloads" isDirectory:YES];
+    }
+    NSError* error = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtURL:directory
+        withIntermediateDirectories:!extensionPackage attributes:nil error:&error]) {
+        completionHandler(nil);
+        return;
+    }
+    NSURL* destination = extensionPackage
+        ? [directory URLByAppendingPathComponent:@"package.xpi"]
+        : [self collisionSafeDestinationInDirectory:directory
+            filename:[self safeDownloadFilename:suggestedFilename]];
+    [self.downloadDestinations setObject:destination forKey:download];
+    if (extensionPackage) [self.extensionDownloads addObject:download];
+    completionHandler(destination);
+}
+- (void)downloadDidFinish:(WKDownload*)download
+{
+    NSURL* destination = [self.downloadDestinations objectForKey:download];
+    if (destination && [self.extensionDownloads containsObject:download])
+        emit(self, UBAR_DOWNLOAD_REQUESTED, destination.path);
+    [self.downloadDestinations removeObjectForKey:download];
+    [self.extensionDownloads removeObject:download];
+}
+- (void)download:(WKDownload*)download didFailWithError:(NSError*)error resumeData:(NSData*)resumeData
+{
+    NSURL* destination = [self.downloadDestinations objectForKey:download];
+    if (destination) {
+        NSURL* cleanup = [self.extensionDownloads containsObject:download]
+            ? destination.URLByDeletingLastPathComponent : destination;
+        [[NSFileManager defaultManager] removeItemAtURL:cleanup error:nil];
+    }
+    [self.downloadDestinations removeObjectForKey:download];
+    [self.extensionDownloads removeObject:download];
 }
 @end
 
@@ -89,7 +229,8 @@ UbarResult create_profile(uint64_t id, const UbarProfileConfigV1* config)
         WKWebsiteDataStore* store = config->kind == UBAR_PROFILE_PRIVATE
             ? [WKWebsiteDataStore nonPersistentDataStore]
             : [WKWebsiteDataStore defaultDataStore];
-        profiles.emplace(id, ProfileState { pool, store, [WKUserContentController new] });
+        profiles.emplace(id, ProfileState { pool, store, [WKUserContentController new],
+            [UbarExtensionMessageHandler new] });
     }
     return UBAR_OK;
 }
@@ -118,12 +259,14 @@ UbarResult create_view(uint64_t id, uint64_t profile, const UbarViewConfigV1* co
         webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         UbarNavigationDelegate* delegate = [UbarNavigationDelegate new];
         delegate.viewID = id;
+        delegate.downloadDestinations = [NSMapTable weakToStrongObjectsMapTable];
+        delegate.extensionDownloads = [NSHashTable weakObjectsHashTable];
         if (callbacks)
             delegate.callbacks = *callbacks;
         webView.navigationDelegate = delegate;
         webView.hidden = !config->initially_visible;
         [parent addSubview:webView];
-        views.emplace(id, ViewState { webView, delegate });
+        views.emplace(id, ViewState { profile, webView, delegate, {} });
     }
     return UBAR_OK;
 }
@@ -133,8 +276,31 @@ UbarResult destroy_view(uint64_t id)
     auto found = views.find(id);
     if (found == views.end())
         return UBAR_INVALID_ARGUMENT;
+    clear_extension_worlds(id);
     [found->second.webView removeFromSuperview];
     views.erase(found);
+    return UBAR_OK;
+}
+
+UbarResult create_headless_view(uint64_t id, uint64_t profile, const UbarCallbacksV1* callbacks)
+{
+    auto owner = profiles.find(profile);
+    if (!id || owner == profiles.end() || views.contains(id)) return UBAR_INVALID_ARGUMENT;
+    @autoreleasepool {
+        WKWebViewConfiguration* config = [WKWebViewConfiguration new];
+        config.processPool = owner->second.processPool;
+        config.websiteDataStore = owner->second.dataStore;
+        config.userContentController = owner->second.userContentController;
+        config.preferences.javaScriptCanOpenWindowsAutomatically = NO;
+        WKWebView* webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:config];
+        UbarNavigationDelegate* delegate = [UbarNavigationDelegate new];
+        delegate.viewID = id;
+        delegate.downloadDestinations = [NSMapTable weakToStrongObjectsMapTable];
+        delegate.extensionDownloads = [NSHashTable weakObjectsHashTable];
+        if (callbacks) delegate.callbacks = *callbacks;
+        webView.navigationDelegate = delegate;
+        views.emplace(id, ViewState { profile, webView, delegate, {} });
+    }
     return UBAR_OK;
 }
 
@@ -239,10 +405,59 @@ UbarResult set_request_policy_json(uint64_t profile, UbarBytes value)
 const UbarWebKitPortApiV1 api {
     UBAR_WEBKIT_PORT_ABI_V1, sizeof(UbarWebKitPortApiV1), create_profile, destroy_profile,
     create_view, destroy_view, navigate, set_visible, set_zoom, suspend, resume,
-    go_back, go_forward, reload, stop, set_request_policy_json
+    go_back, go_forward, reload, stop, set_request_policy_json,
+    [](UbarView view, UbarBytes world_utf8, UbarBytes script_utf8) -> UbarResult {
+      auto found = views.find(view);
+      if (found == views.end()) {
+        return UBAR_INVALID_ARGUMENT;
+      }
+      NSString* world = string_from_bytes(world_utf8);
+      NSString* script = string_from_bytes(script_utf8);
+      if (world.length) {
+          auto owner = profiles.find(found->second.profile);
+          if (owner == profiles.end()) return UBAR_INVALID_ARGUMENT;
+          const std::string worldKey = world.UTF8String;
+          if (found->second.bridgeWorlds.insert(worldKey).second)
+              [owner->second.userContentController
+                  addScriptMessageHandler:owner->second.extensionMessageHandler
+                  contentWorld:[WKContentWorld worldWithName:world]
+                  name:@"ubarExtensionBridge"];
+          NSData* worldJSON = [NSJSONSerialization dataWithJSONObject:@[world] options:0 error:nil];
+          NSString* quotedWorld = [[NSString alloc] initWithData:worldJSON encoding:NSUTF8StringEncoding];
+          quotedWorld = [quotedWorld substringWithRange:NSMakeRange(1, quotedWorld.length - 2)];
+          NSString* bridge = [NSString stringWithFormat:
+              @"if(!globalThis.__ubarExtensionBridge)Object.defineProperty(globalThis,'__ubarExtensionBridge',{value:{postMessage(m){webkit.messageHandlers.ubarExtensionBridge.postMessage(JSON.stringify({world:%@,message:String(m)}));}},configurable:false});\n%@",
+              quotedWorld, script];
+          script = bridge;
+      }
+      WKContentWorld* content_world = world.length
+          ? [WKContentWorld worldWithName:world]
+          : [WKContentWorld pageWorld];
+      [found->second.webView callAsyncJavaScript:script
+                                      arguments:@{}
+                                        inFrame:nil
+                                 inContentWorld:content_world
+                              completionHandler:nil];
+      return UBAR_OK;
+    },
+    create_headless_view
 };
 
 } // namespace
+
+@implementation UbarExtensionMessageHandler
+- (void)userContentController:(WKUserContentController*)controller
+      didReceiveScriptMessage:(WKScriptMessage*)message
+{
+    if (![message.body isKindOfClass:[NSString class]]) return;
+    for (auto& [_, view] : views) {
+        if (view.webView == message.webView) {
+            emit(view.delegate, UBAR_EXTENSION_MESSAGE, (NSString*)message.body);
+            return;
+        }
+    }
+}
+@end
 
 extern "C" UBAR_EXPORT UbarResult ubar_webkit_port_get_api(
     uint32_t requested_abi, const UbarWebKitPortApiV1** api_out)
