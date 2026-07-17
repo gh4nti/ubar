@@ -720,6 +720,9 @@ impl App {
                 self.active = index.min(self.tabs.len() - 1);
             }
             self.resume_tab(self.active);
+            if let Some(window) = &self.window {
+                let _ = self.tabs[self.active].webview.set_bounds(content_bounds(window));
+            }
             let _ = self.tabs[self.active].webview.set_visible(true);
             let _ = self.tabs[self.active].webview.focus();
             self.sync_toolbar();
@@ -739,6 +742,9 @@ impl App {
         self.request_suspend(self.active);
         self.active = index;
         self.resume_tab(index);
+        if let Some(window) = &self.window {
+            let _ = self.tabs[index].webview.set_bounds(content_bounds(window));
+        }
         let _ = self.tabs[index].webview.set_visible(true);
         let _ = self.tabs[index].webview.focus();
         self.sync_toolbar();
@@ -1383,12 +1389,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(window) = &self.window {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        let _ = tab.webview.set_bounds(content_bounds(window));
+                    }
                     if let Some(toolbar) = &self.toolbar {
                         let _ = toolbar.set_bounds(toolbar_bounds(window, self.menu_open));
-                        raise_webview(toolbar);
-                    }
-                    for tab in &self.tabs {
-                        let _ = tab.webview.set_bounds(content_bounds(window));
+                        if self.menu_open {
+                            raise_webview(toolbar);
+                        }
                     }
                 }
             }
